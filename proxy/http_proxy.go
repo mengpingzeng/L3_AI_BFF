@@ -106,6 +106,8 @@ func MapDownstreamError(service string, downstreamStatus int, downstreamBody []b
 		return model.ErrUnauthorized
 	case 404:
 		return model.ErrNotFound
+	case 409:
+		return model.ErrConflict
 	case 429:
 		return model.ErrRateLimited
 	case 500:
@@ -130,19 +132,34 @@ func HandleDownstreamResponse(c *gin.Context, respBody []byte, statusCode int, s
 
 	appErr := MapDownstreamError(service, statusCode, respBody)
 	tid, _ := c.Get(model.TraceIDKey)
+
+	// 复制一份，避免污染全局单例
+	errCopy := &model.AppError{
+		Code:       appErr.Code,
+		Message:    appErr.Message,
+		HTTPStatus: appErr.HTTPStatus,
+	}
 	if tid != nil {
-		appErr.TraceID = tid.(string)
+		errCopy.TraceID = tid.(string)
 	}
 
-	detail := string(respBody)
-	if len(detail) > 500 {
-		detail = detail[:500]
-	}
-	if detail != "" {
-		appErr.Detail = fmt.Sprintf("下游返回: %s", detail)
+	// 尝试从下游响应体中提取 message，优先展示给前端
+	if len(respBody) > 0 {
+		var downstream struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(respBody, &downstream) == nil && downstream.Message != "" {
+			errCopy.Message = downstream.Message
+		} else {
+			detail := string(respBody)
+			if len(detail) > 500 {
+				detail = detail[:500]
+			}
+			errCopy.Detail = fmt.Sprintf("下游返回: %s", detail)
+		}
 	}
 
-	c.AbortWithStatusJSON(appErr.HTTPStatus, appErr)
+	c.AbortWithStatusJSON(errCopy.HTTPStatus, errCopy)
 }
 
 func jsonMarshal(v interface{}) ([]byte, error) {
@@ -158,4 +175,27 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "…(已截断)"
+}
+
+func ForwardDelete(c *gin.Context, upstreamURL string) ([]byte, int, error) {
+	tid, _ := c.Get(model.TraceIDKey)
+	log.Printf("[转发] DELETE %s | trace_id=%v", upstreamURL, tid)
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodDelete, upstreamURL, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	if tid != nil {
+		req.Header.Set("X-Trace-ID", tid.(string))
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, 0, err
+	}
+	log.Printf("[转发完成] DELETE %s | trace_id=%v | 下游状态=%d", upstreamURL, tid, resp.StatusCode)
+	return body, resp.StatusCode, nil
 }

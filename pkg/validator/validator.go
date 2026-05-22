@@ -7,7 +7,7 @@ import (
 )
 
 var (
-	reSkillID      = regexp.MustCompile(`^[a-z][a-z0-9_]{2,63}$`)
+	reSkillID      = regexp.MustCompile(`^[a-z][a-z0-9_-]{2,63}$`)
 	reTaskID       = regexp.MustCompile(`^task_[a-z0-9]{12}$`)
 	reSessionID    = regexp.MustCompile(`^(sess_)?[a-z0-9]+$`)
 	reAccID        = regexp.MustCompile(`^acc_[a-z0-9]+$`)

@@ -42,6 +42,59 @@ func CreateTask(taskURL string) gin.HandlerFunc {
 	}
 }
 
+func TaskUpdate(sessionMgrURL string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tid := c.Param("tid")
+		var body map[string]interface{}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			model.Error(c, model.ErrInvalidParam.WithDetail("请求体格式错误"))
+			return
+		}
+		url := sessionMgrURL + "/api/task/" + tid + "/update"
+		respBody, statusCode, err := proxy.Forward(c, url, body)
+		if err != nil {
+			model.Error(c, model.ErrUpstreamUnavailable.WithDetail(err.Error()))
+			return
+		}
+		proxy.HandleDownstreamResponse(c, respBody, statusCode, "session_mgr", func(c *gin.Context, data []byte) {
+			c.Header("Content-Type", "application/json")
+			c.String(200, string(data))
+		})
+	}
+}
+
+func DeleteTask(sessionMgrURL string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tid := c.Param("tid")
+		url := sessionMgrURL + "/api/task/" + tid
+		respBody, statusCode, err := proxy.ForwardDelete(c, url)
+		if err != nil {
+			model.Error(c, model.ErrUpstreamUnavailable.WithDetail(err.Error()))
+			return
+		}
+		proxy.HandleDownstreamResponse(c, respBody, statusCode, "session_mgr", func(c *gin.Context, data []byte) {
+			c.Header("Content-Type", "application/json")
+			c.String(200, string(data))
+		})
+	}
+}
+
+func TaskSessions(sessionMgrURL string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tid := c.Param("tid")
+		url := sessionMgrURL + "/api/task/" + tid + "/sessions"
+		respBody, statusCode, err := proxy.ForwardGet(c, url)
+		if err != nil {
+			model.Error(c, model.ErrUpstreamUnavailable.WithDetail(err.Error()))
+			return
+		}
+		proxy.HandleDownstreamResponse(c, respBody, statusCode, "session_mgr", func(c *gin.Context, data []byte) {
+			c.Header("Content-Type", "application/json")
+			c.String(200, string(data))
+		})
+	}
+}
+
 func ListTask(listURL string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var q model.TaskListQuery

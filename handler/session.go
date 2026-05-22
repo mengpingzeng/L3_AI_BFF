@@ -34,6 +34,7 @@ func CreateSession(sessionURL string) gin.HandlerFunc {
 			"topic":      req.Topic,
 			"platform":   req.Platform,
 			"account_id": req.AccountID,
+			"novel_name": req.NovelName,
 			"uid":        uid,
 			"trace_id":   tid,
 		}

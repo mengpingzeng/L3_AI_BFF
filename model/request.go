@@ -17,6 +17,7 @@ type CreateSessionReq struct {
 	Topic     string `json:"topic"`
 	Platform  string `json:"platform"`
 	AccountID string `json:"accountId"`
+	NovelName string `json:"novel_name,omitempty"`
 }
 
 type SendMessageReq struct {

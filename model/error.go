@@ -36,6 +36,8 @@ var (
 	ErrMethodNotAllowed   = &AppError{Code: 1005, Message: "不支持的请求方法", HTTPStatus: 405}
 	ErrRateLimited        = &AppError{Code: 1006, Message: "请求太频繁，请稍后重试", HTTPStatus: 429}
 
+	ErrConflict           = &AppError{Code: 1007, Message: "请求冲突", HTTPStatus: 409}
+
 	ErrInternal           = &AppError{Code: 9001, Message: "服务器内部错误", HTTPStatus: 500}
 	ErrUpstreamUnavailable = &AppError{Code: 9002, Message: "下游服务暂不可用", HTTPStatus: 502}
 	ErrUpstreamTimeout     = &AppError{Code: 9003, Message: "下游服务响应超时", HTTPStatus: 504}
