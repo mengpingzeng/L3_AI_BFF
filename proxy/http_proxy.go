@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/claw-studio/L3_AI_BFF/model"
@@ -14,7 +15,7 @@ import (
 )
 
 var httpClient = &http.Client{
-	Timeout: 210 * time.Second,
+	Timeout: 600 * time.Second,
 }
 
 func Forward(c *gin.Context, upstreamURL string, bodyData map[string]interface{}) ([]byte, int, error) {
@@ -64,7 +65,8 @@ func ForwardGet(c *gin.Context, upstreamURL string) ([]byte, int, error) {
 
 	log.Printf("[转发] GET %s | trace_id=%v", upstreamURL, tid)
 
-	if c.Request.URL.RawQuery != "" {
+	// 上游 URL 已含 query 时不再追加，避免 page/size/q 等参数重复导致搜索失效
+	if c.Request.URL.RawQuery != "" && !strings.Contains(upstreamURL, "?") {
 		upstreamURL += "?" + c.Request.URL.RawQuery
 	}
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, upstreamURL, nil)

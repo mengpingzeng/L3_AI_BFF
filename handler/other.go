@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/claw-studio/L3_AI_BFF/model"
@@ -15,6 +16,10 @@ var dashboardArrayKeys = map[string]bool{
 	"platforms": true, "accountIds": true, "skillIds": true, "sessionIds": true,
 }
 
+var dashboardIntKeys = map[string]bool{
+	"page": true, "size": true,
+}
+
 func DashboardProxy(dashboardURL string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		body := make(map[string]interface{})
@@ -22,6 +27,10 @@ func DashboardProxy(dashboardURL string) gin.HandlerFunc {
 		for key, values := range query {
 			if dashboardArrayKeys[key] {
 				body[key] = values
+			} else if dashboardIntKeys[key] && len(values) == 1 {
+				if v, err := strconv.Atoi(values[0]); err == nil {
+					body[key] = v
+				}
 			} else if len(values) == 1 {
 				body[key] = values[0]
 			} else {

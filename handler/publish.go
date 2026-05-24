@@ -122,8 +122,8 @@ func PublishTask(publishURL, sessionMgrURL, accountURL string) gin.HandlerFunc {
 			return
 		}
 
-		if statusCode >= 200 && statusCode < 300 && req.NovelName != "" && sessionMgrURL != "" {
-			go updateTaskOnSessionMgr(sessionMgrURL, tid, req.NovelName)
+		if statusCode >= 200 && statusCode < 300 && sessionMgrURL != "" {
+			go updateTaskOnSessionMgr(sessionMgrURL, tid, req.NovelName, req.VolumeName, req.Title, req.ChapterNumber)
 		}
 
 		proxy.HandleDownstreamResponse(c, respBody, statusCode, "workflow", func(c *gin.Context, data []byte) {
@@ -162,10 +162,13 @@ func fetchUserAccounts(accountURL, uid, platform string) []accountInfo {
 	return result.Accounts
 }
 
-func updateTaskOnSessionMgr(sessionMgrURL, taskID, novelName string) {
+func updateTaskOnSessionMgr(sessionMgrURL, taskID, novelName, volumeName, chapterTitle string, chapterNumber int) {
 	url := sessionMgrURL + "/api/task/" + taskID + "/update"
 	body := map[string]interface{}{
 		"novel_name":          novelName,
+		"volume_name":         volumeName,
+		"title":               chapterTitle,
+		"chapter_number":      chapterNumber,
 		"chapter_count_delta": 1,
 	}
 	data, err := json.Marshal(body)

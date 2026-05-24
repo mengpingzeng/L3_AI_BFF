@@ -10,14 +10,15 @@ type CreateTaskReq struct {
 }
 
 type CreateSessionReq struct {
-	TaskID    string `json:"task_id"`
-	SkillID   string `json:"skillId"`
-	SkillVer  string `json:"skillVer"`
-	Model     string `json:"model"`
-	Topic     string `json:"topic"`
-	Platform  string `json:"platform"`
-	AccountID string `json:"accountId"`
-	NovelName string `json:"novel_name,omitempty"`
+	TaskID        string `json:"task_id"`
+	SkillID       string `json:"skillId"`
+	SkillVer      string `json:"skillVer"`
+	Model         string `json:"model"`
+	Topic         string `json:"topic"`
+	Platform      string `json:"platform"`
+	AccountID     string `json:"accountId"`
+	NovelName     string `json:"novel_name,omitempty"`
+	ChapterNumber int    `json:"chapter_number,omitempty"`
 }
 
 type SendMessageReq struct {
@@ -39,8 +40,9 @@ type PublishReq struct {
 }
 
 type TaskListQuery struct {
-	Page int `form:"page"`
-	Size int `form:"size"`
+	Page int    `form:"page"`
+	Size int    `form:"size"`
+	Q    string `form:"q"`
 }
 
 type TimelineQuery struct {

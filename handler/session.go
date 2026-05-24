@@ -27,16 +27,17 @@ func CreateSession(sessionURL string) gin.HandlerFunc {
 		uid, _ := c.Get("uid")
 
 		downstream := map[string]interface{}{
-			"task_id":    req.TaskID,
-			"skill_id":   req.SkillID,
-			"skillVer":   req.SkillVer,
-			"model":      req.Model,
-			"topic":      req.Topic,
-			"platform":   req.Platform,
-			"account_id": req.AccountID,
-			"novel_name": req.NovelName,
-			"uid":        uid,
-			"trace_id":   tid,
+			"task_id":        req.TaskID,
+			"skill_id":       req.SkillID,
+			"skillVer":       req.SkillVer,
+			"model":          req.Model,
+			"topic":          req.Topic,
+			"platform":       req.Platform,
+			"account_id":     req.AccountID,
+			"novel_name":     req.NovelName,
+			"chapter_number": req.ChapterNumber,
+			"uid":            uid,
+			"trace_id":       tid,
 		}
 
 		respBody, statusCode, err := proxy.Forward(c, sessionURL, downstream)
@@ -129,6 +130,22 @@ func SendMessage(messageURL string) gin.HandlerFunc {
 			return
 		}
 
+		proxy.HandleDownstreamResponse(c, respBody, statusCode, "session_mgr", func(c *gin.Context, data []byte) {
+			c.Header("Content-Type", "application/json")
+			c.String(200, string(data))
+		})
+	}
+}
+
+func CloseSession(sessionMgrURL string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		sid := c.Param("sid")
+		url := fmt.Sprintf("%s/api/session/%s/close", sessionMgrURL, sid)
+		respBody, statusCode, err := proxy.Forward(c, url, map[string]interface{}{})
+		if err != nil {
+			model.Error(c, model.ErrUpstreamUnavailable.WithDetail(err.Error()))
+			return
+		}
 		proxy.HandleDownstreamResponse(c, respBody, statusCode, "session_mgr", func(c *gin.Context, data []byte) {
 			c.Header("Content-Type", "application/json")
 			c.String(200, string(data))

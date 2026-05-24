@@ -25,11 +25,11 @@ func main() {
 	r := router.Setup(cfg, wsProxy)
 
 	srv := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      r,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:        ":" + cfg.Port,
+		Handler:     r,
+		ReadTimeout: 30 * time.Second,
+		WriteTimeout: 0, // WebSocket 长连接不能有写超时，否则 AI 思考阶段会被强制断开
+		IdleTimeout: 120 * time.Second,
 	}
 
 	go func() {

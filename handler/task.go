@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"net/url"
+
 	"github.com/claw-studio/L3_AI_BFF/model"
 	"github.com/claw-studio/L3_AI_BFF/pkg/idgen"
 	"github.com/claw-studio/L3_AI_BFF/pkg/validator"
@@ -95,6 +97,22 @@ func TaskSessions(sessionMgrURL string) gin.HandlerFunc {
 	}
 }
 
+func GetTask(sessionMgrURL string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tid := c.Param("tid")
+		url := sessionMgrURL + "/api/task/" + tid
+		respBody, statusCode, err := proxy.ForwardGet(c, url)
+		if err != nil {
+			model.Error(c, model.ErrUpstreamUnavailable.WithDetail(err.Error()))
+			return
+		}
+		proxy.HandleDownstreamResponse(c, respBody, statusCode, "session_mgr", func(c *gin.Context, data []byte) {
+			c.Header("Content-Type", "application/json")
+			c.String(200, string(data))
+		})
+	}
+}
+
 func ListTask(listURL string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var q model.TaskListQuery
@@ -107,7 +125,7 @@ func ListTask(listURL string) gin.HandlerFunc {
 			q.Page = 1
 		}
 		if q.Size == 0 {
-			q.Size = 20
+			q.Size = 12
 		}
 
 		vr := validator.ValidatePagination(q.Page, q.Size)
@@ -117,6 +135,9 @@ func ListTask(listURL string) gin.HandlerFunc {
 		}
 
 		queryURL := listURL + "?page=" + intToStr(q.Page) + "&size=" + intToStr(q.Size)
+		if q.Q != "" {
+			queryURL += "&q=" + url.QueryEscape(q.Q)
+		}
 
 		uid, _ := c.Get("uid")
 		role, _ := c.Get("role")

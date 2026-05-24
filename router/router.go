@@ -39,6 +39,7 @@ func Setup(cfg *config.Config, wsProxy *proxy.WSProxy) *gin.Engine {
 			taskGroup.GET("/list", handler.ListTask(formatURL(cfg.SessionMgrURL, "/api/task/list")))
 			taskGroup.GET("/:tid/timeline", handler.GetTaskTimeline(formatURL(cfg.SessionMgrURL, "/api/task/")))
 			taskGroup.GET("/:tid/sessions", handler.TaskSessions(cfg.SessionMgrURL))
+			taskGroup.GET("/:tid", handler.GetTask(cfg.SessionMgrURL))
 			taskGroup.POST("/:tid/update", handler.TaskUpdate(cfg.SessionMgrURL))
 			taskGroup.DELETE("/:tid", handler.DeleteTask(cfg.SessionMgrURL))
 			taskGroup.POST("/:tid/publish", handler.PublishTask(formatURL(cfg.WorkflowURL, "/api/task"), cfg.SessionMgrURL, cfg.A1AccountURL))
@@ -49,6 +50,7 @@ func Setup(cfg *config.Config, wsProxy *proxy.WSProxy) *gin.Engine {
 			sessionGroup.GET("/list", handler.ListSessions(formatURL(cfg.SessionMgrURL, "/api/sessions")))
 			sessionGroup.POST("/create", handler.CreateSession(formatURL(cfg.SessionMgrURL, "/api/session/create")))
 			sessionGroup.POST("/:sid/message", handler.SendMessage(formatURL(cfg.SessionMgrURL, "/api/session")))
+			sessionGroup.POST("/:sid/close", handler.CloseSession(cfg.SessionMgrURL))
 			sessionGroup.GET("/:sid/draft", handler.SessionDraft(formatURL(cfg.SessionMgrURL, "/api/session")))
 		}
 
