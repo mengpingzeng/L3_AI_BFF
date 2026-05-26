@@ -49,3 +49,29 @@ type TimelineQuery struct {
 	Cursor string `form:"cursor"`
 	Limit  int    `form:"limit"`
 }
+
+type AutoPublishStartReq struct {
+	TaskID     string   `json:"task_id"`
+	Platform   string   `json:"platform"`
+	Accounts   []string `json:"accounts,omitempty"`
+	SkillID    string   `json:"skill_id,omitempty"`
+	Topic      string   `json:"topic,omitempty"`
+	NovelName  string   `json:"novel_name,omitempty"`
+	VolumeName string   `json:"volume_name,omitempty"`
+}
+
+type AutoPublishStopReq struct {
+	TaskID string `json:"task_id"`
+	UserID string `json:"user_id"`
+}
+
+type AutoPublishFinishReq struct {
+	TaskID string `json:"task_id"`
+	UserID string `json:"user_id"`
+}
+
+type AllocSkillReq struct {
+	Platform string `json:"platform" binding:"required"`
+	Theme    string `json:"theme,omitempty"`
+	Style    string `json:"style,omitempty"`
+}

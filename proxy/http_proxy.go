@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/claw-studio/L3_AI_BFF/middleware"
 	"github.com/claw-studio/L3_AI_BFF/model"
+	"clawstudios/pkg/logging"
 	"github.com/gin-gonic/gin"
 )
 
@@ -18,85 +19,121 @@ var httpClient = &http.Client{
 	Timeout: 600 * time.Second,
 }
 
-func Forward(c *gin.Context, upstreamURL string, bodyData map[string]interface{}) ([]byte, int, error) {
-	tid, _ := c.Get(model.TraceIDKey)
+func injectProxyHeaders(c *gin.Context, req *http.Request, bodyData map[string]interface{}) {
+	if tid, ok := c.Get(model.TraceIDKey); ok {
+		req.Header.Set("X-Trace-ID", tid.(string))
+	}
+	if uid, ok := c.Get("uid"); ok {
+		req.Header.Set("X-User-ID", uid.(string))
+	}
+	if role, ok := c.Get("role"); ok {
+		req.Header.Set("X-User-Role", role.(string))
+	}
 
+	if tid := c.Param("tid"); tid != "" {
+		req.Header.Set("X-Task-ID", tid)
+	}
+	if sid := c.Param("sid"); sid != "" {
+		req.Header.Set("X-Session-ID", sid)
+	}
+
+	if bodyData != nil {
+		if v, ok := bodyData["task_id"].(string); ok && v != "" {
+			req.Header.Set("X-Task-ID", v)
+		}
+		if v, ok := bodyData["taskId"].(string); ok && v != "" {
+			req.Header.Set("X-Task-ID", v)
+		}
+		if v, ok := bodyData["session_id"].(string); ok && v != "" {
+			req.Header.Set("X-Session-ID", v)
+		}
+	}
+}
+
+func Forward(c *gin.Context, upstreamURL string, bodyData map[string]interface{}) ([]byte, int, error) {
 	jsonBody, err := jsonMarshal(bodyData)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	log.Printf("[转发] POST %s | trace_id=%v | body=%s", upstreamURL, tid, truncate(string(jsonBody), 300))
+	logger := middleware.GetBFFLogger(c)
 
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, upstreamURL, bytes.NewBuffer(jsonBody))
 	if err != nil {
+		if logger != nil {
+			logger.Error(logging.ErrProxyError, "创建下游请求失败: %s %s — %v", "POST", upstreamURL, err)
+		}
 		return nil, 0, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if tid != nil {
-		req.Header.Set("X-Trace-ID", tid.(string))
-	}
-	if uid, ok := c.Get("uid"); ok {
-		req.Header.Set("X-User-ID", uid.(string))
-	}
-	if role, ok := c.Get("role"); ok {
-		req.Header.Set("X-User-Role", role.(string))
-	}
+	injectProxyHeaders(c, req, bodyData)
 
+	start := time.Now()
 	resp, err := httpClient.Do(req)
+	duration := time.Since(start)
+
 	if err != nil {
-		log.Printf("[转发失败] POST %s | trace_id=%v | err=%v", upstreamURL, tid, err)
+		if logger != nil {
+			logger.LogProxyCall(upstreamURL, "POST", jsonBody, 0, nil, duration, err)
+		}
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if logger != nil {
+			logger.LogProxyCall(upstreamURL, "POST", jsonBody, 0, nil, duration, err)
+		}
 		return nil, 0, err
 	}
 
-	log.Printf("[转发完成] POST %s | trace_id=%v | 下游状态=%d | 返回长度=%d", upstreamURL, tid, resp.StatusCode, len(respBody))
+	if logger != nil {
+		logger.LogProxyCall(upstreamURL, "POST", jsonBody, resp.StatusCode, respBody, duration, nil)
+	}
 	return respBody, resp.StatusCode, nil
 }
 
 func ForwardGet(c *gin.Context, upstreamURL string) ([]byte, int, error) {
-	tid, _ := c.Get(model.TraceIDKey)
+	logger := middleware.GetBFFLogger(c)
 
-	log.Printf("[转发] GET %s | trace_id=%v", upstreamURL, tid)
-
-	// 上游 URL 已含 query 时不再追加，避免 page/size/q 等参数重复导致搜索失效
 	if c.Request.URL.RawQuery != "" && !strings.Contains(upstreamURL, "?") {
 		upstreamURL += "?" + c.Request.URL.RawQuery
 	}
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, upstreamURL, nil)
 	if err != nil {
+		if logger != nil {
+			logger.Error(logging.ErrProxyError, "创建下游请求失败: GET %s — %v", upstreamURL, err)
+		}
 		return nil, 0, err
 	}
 
-	if tid != nil {
-		req.Header.Set("X-Trace-ID", tid.(string))
-	}
-	if uid, ok := c.Get("uid"); ok {
-		req.Header.Set("X-User-ID", uid.(string))
-	}
-	if role, ok := c.Get("role"); ok {
-		req.Header.Set("X-User-Role", role.(string))
-	}
+	injectProxyHeaders(c, req, nil)
 
+	start := time.Now()
 	resp, err := httpClient.Do(req)
+	duration := time.Since(start)
+
 	if err != nil {
-		log.Printf("[转发失败] GET %s | trace_id=%v | err=%v", upstreamURL, tid, err)
+		if logger != nil {
+			logger.LogProxyCall(upstreamURL, "GET", nil, 0, nil, duration, err)
+		}
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if logger != nil {
+			logger.LogProxyCall(upstreamURL, "GET", nil, resp.StatusCode, respBody, duration, err)
+		}
 		return nil, 0, err
 	}
 
-	log.Printf("[转发完成] GET %s | trace_id=%v | 下游状态=%d | 返回长度=%d", upstreamURL, tid, resp.StatusCode, len(respBody))
+	if logger != nil {
+		logger.LogProxyCall(upstreamURL, "GET", nil, resp.StatusCode, respBody, duration, nil)
+	}
 	return respBody, resp.StatusCode, nil
 }
 
@@ -135,7 +172,6 @@ func HandleDownstreamResponse(c *gin.Context, respBody []byte, statusCode int, s
 	appErr := MapDownstreamError(service, statusCode, respBody)
 	tid, _ := c.Get(model.TraceIDKey)
 
-	// 复制一份，避免污染全局单例
 	errCopy := &model.AppError{
 		Code:       appErr.Code,
 		Message:    appErr.Message,
@@ -145,7 +181,6 @@ func HandleDownstreamResponse(c *gin.Context, respBody []byte, statusCode int, s
 		errCopy.TraceID = tid.(string)
 	}
 
-	// 尝试从下游响应体中提取 message，优先展示给前端
 	if len(respBody) > 0 {
 		var downstream struct {
 			Message string `json:"message"`
@@ -161,6 +196,11 @@ func HandleDownstreamResponse(c *gin.Context, respBody []byte, statusCode int, s
 		}
 	}
 
+	logger := middleware.GetBFFLogger(c)
+	if logger != nil {
+		logger.Warn(logging.WarnServiceDegraded, "下游 %s 返回错误 [%d]: %s", service, statusCode, errCopy.Message)
+	}
+
 	c.AbortWithStatusJSON(errCopy.HTTPStatus, errCopy)
 }
 
@@ -172,25 +212,23 @@ func jsonMarshal(v interface{}) ([]byte, error) {
 	return bytes.TrimRight(buf.Bytes(), "\n"), err
 }
 
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "…(已截断)"
-}
-
 func ForwardDelete(c *gin.Context, upstreamURL string) ([]byte, int, error) {
-	tid, _ := c.Get(model.TraceIDKey)
-	log.Printf("[转发] DELETE %s | trace_id=%v", upstreamURL, tid)
+	logger := middleware.GetBFFLogger(c)
+
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodDelete, upstreamURL, nil)
 	if err != nil {
 		return nil, 0, err
 	}
-	if tid != nil {
-		req.Header.Set("X-Trace-ID", tid.(string))
-	}
+
+	injectProxyHeaders(c, req, nil)
+
+	start := time.Now()
 	resp, err := httpClient.Do(req)
+	duration := time.Since(start)
 	if err != nil {
+		if logger != nil {
+			logger.LogProxyCall(upstreamURL, "DELETE", nil, 0, nil, duration, err)
+		}
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
@@ -198,6 +236,9 @@ func ForwardDelete(c *gin.Context, upstreamURL string) ([]byte, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	log.Printf("[转发完成] DELETE %s | trace_id=%v | 下游状态=%d", upstreamURL, tid, resp.StatusCode)
+
+	if logger != nil {
+		logger.LogProxyCall(upstreamURL, "DELETE", nil, resp.StatusCode, body, duration, nil)
+	}
 	return body, resp.StatusCode, nil
 }

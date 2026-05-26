@@ -12,11 +12,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func Setup(cfg *config.Config, wsProxy *proxy.WSProxy) *gin.Engine {
+func Setup(cfg *config.Config, wsProxy *proxy.WSProxy, autoPubMgr *handler.AutoPublishManager) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 
 	r.Use(middleware.TraceID())
+	r.Use(middleware.Logging())
 	r.Use(middleware.Recovery())
 	r.Use(middleware.CORS())
 	r.Use(middleware.AuthRequired())
@@ -37,10 +38,18 @@ func Setup(cfg *config.Config, wsProxy *proxy.WSProxy) *gin.Engine {
 		{
 			taskGroup.POST("/create", handler.CreateTask(formatURL(cfg.SessionMgrURL, "")))
 			taskGroup.GET("/list", handler.ListTask(formatURL(cfg.SessionMgrURL, "/api/task/list")))
+			taskGroup.POST("/alloc_skill", handler.AllocSkill(cfg.SkillRegistryURL))
+			taskGroup.POST("/stop", autoPubMgr.StopAutoPublish())
+			taskGroup.POST("/finish", autoPubMgr.FinishAutoPublish())
+			taskGroup.POST("/auto-publish/start", autoPubMgr.StartAutoPublish())
 			taskGroup.GET("/:tid/timeline", handler.GetTaskTimeline(formatURL(cfg.SessionMgrURL, "/api/task/")))
 			taskGroup.GET("/:tid/sessions", handler.TaskSessions(cfg.SessionMgrURL))
 			taskGroup.GET("/:tid", handler.GetTask(cfg.SessionMgrURL))
+			taskGroup.GET("/:tid/book/info", handler.BookGetInfo(cfg.SessionMgrURL))
+			taskGroup.GET("/:tid/book/content", handler.BookGetContent(cfg.SessionMgrURL))
+			taskGroup.GET("/:tid/publish/list", handler.GetTaskPublishList(cfg.C2DashboardURL))
 			taskGroup.POST("/:tid/update", handler.TaskUpdate(cfg.SessionMgrURL))
+			taskGroup.GET("/:tid/messages", handler.TaskMessages(cfg.SessionMgrURL))
 			taskGroup.DELETE("/:tid", handler.DeleteTask(cfg.SessionMgrURL))
 			taskGroup.POST("/:tid/publish", handler.PublishTask(formatURL(cfg.WorkflowURL, "/api/task"), cfg.SessionMgrURL, cfg.A1AccountURL))
 		}
@@ -64,6 +73,10 @@ func Setup(cfg *config.Config, wsProxy *proxy.WSProxy) *gin.Engine {
 		api.GET("/models", handler.ModelProxy(cfg.AIModelURL))
 
 		api.POST("/novel/title-suggest", handler.NovelTitleSuggest())
+
+		api.GET("/publish/get_status", autoPubMgr.GetPublishStatus())
+		api.GET("/publish/history", handler.GetPublishHistory(cfg.SessionMgrURL, cfg.WorkflowURL))
+		api.GET("/publish/session", handler.GetPublishSession(cfg.SessionMgrURL, cfg.WorkflowURL))
 
 		api.POST("/auth/login", handler.AuthLoginProxy(cfg.A1AccountURL))
 
@@ -89,6 +102,19 @@ func Setup(cfg *config.Config, wsProxy *proxy.WSProxy) *gin.Engine {
 
 		sid := c.Param("session_id")
 		upstreamURL := fmt.Sprintf("ws%s/api/session/%s/stream", wsScheme(cfg.SessionMgrURL), sid)
+		if err := wsProxy.Proxy(c.Writer, c.Request, upstreamURL, uid); err != nil {
+			return
+		}
+	})
+
+	r.GET("/ws/chat/:task_id", func(c *gin.Context) {
+		uid, err := auth(c.Writer, c.Request)
+		if err != nil {
+			return
+		}
+
+		tid := c.Param("task_id")
+		upstreamURL := fmt.Sprintf("ws%s/api/task/%s/stream", wsScheme(cfg.SessionMgrURL), tid)
 		if err := wsProxy.Proxy(c.Writer, c.Request, upstreamURL, uid); err != nil {
 			return
 		}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/claw-studio/L3_AI_BFF/config"
+	"github.com/claw-studio/L3_AI_BFF/handler"
 	"github.com/claw-studio/L3_AI_BFF/middleware"
 	"github.com/claw-studio/L3_AI_BFF/proxy"
 	"github.com/claw-studio/L3_AI_BFF/router"
@@ -22,7 +23,8 @@ func main() {
 	middleware.InitJWT(cfg.JWTSecret)
 
 	wsProxy := proxy.NewWSProxy(cfg.SessionMgrURL, cfg.WorkflowURL)
-	r := router.Setup(cfg, wsProxy)
+	autoPubMgr := handler.NewAutoPublishManager(cfg.SessionMgrURL, cfg.WorkflowURL, cfg.A1AccountURL)
+	r := router.Setup(cfg, wsProxy, autoPubMgr)
 
 	srv := &http.Server{
 		Addr:        ":" + cfg.Port,

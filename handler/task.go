@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/url"
 
 	"github.com/claw-studio/L3_AI_BFF/model"
@@ -189,6 +190,55 @@ func GetTaskTimeline(timelineURL string) gin.HandlerFunc {
 		}
 
 		respBody, statusCode, err := proxy.ForwardGet(c, queryURL)
+		if err != nil {
+			model.Error(c, model.ErrUpstreamUnavailable.WithDetail(err.Error()))
+			return
+		}
+
+		proxy.HandleDownstreamResponse(c, respBody, statusCode, "session_mgr", func(c *gin.Context, data []byte) {
+			c.Header("Content-Type", "application/json")
+			c.String(200, string(data))
+		})
+	}
+}
+
+func GetTaskPublishList(dashboardURL string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tid := c.Param("tid")
+		if tid == "" {
+			model.Error(c, model.ErrInvalidParam.WithDetail("task id is required"))
+			return
+		}
+
+		body := map[string]interface{}{
+			"taskId": tid,
+			"page":   1,
+			"size":   200,
+		}
+
+		respBody, statusCode, err := proxy.Forward(c, dashboardURL+"/api/dashboard/query", body)
+		if err != nil {
+			model.Error(c, model.ErrUpstreamUnavailable.WithDetail(err.Error()))
+			return
+		}
+
+		proxy.HandleDownstreamResponse(c, respBody, statusCode, "dashboard", func(c *gin.Context, data []byte) {
+			c.Header("Content-Type", "application/json")
+			c.String(200, string(data))
+		})
+	}
+}
+
+func TaskMessages(sessionMgrURL string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tid := c.Param("tid")
+		if tid == "" {
+			model.Error(c, model.ErrInvalidParam.WithDetail("task id is required"))
+			return
+		}
+
+		url := fmt.Sprintf("%s/api/task/%s/messages", sessionMgrURL, tid)
+		respBody, statusCode, err := proxy.ForwardGet(c, url)
 		if err != nil {
 			model.Error(c, model.ErrUpstreamUnavailable.WithDetail(err.Error()))
 			return

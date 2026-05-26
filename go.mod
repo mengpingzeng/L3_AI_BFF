@@ -3,11 +3,14 @@ module github.com/claw-studio/L3_AI_BFF
 go 1.24.11
 
 require (
+	clawstudios/pkg/logging v0.0.0
 	github.com/gin-gonic/gin v1.9.1
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 )
+
+replace clawstudios/pkg/logging => /home/claw_studios/code/pkg/logging
 
 require (
 	github.com/bytedance/sonic v1.9.1 // indirect

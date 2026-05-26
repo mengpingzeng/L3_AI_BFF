@@ -8,9 +8,11 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/claw-studio/L3_AI_BFF/middleware"
 	"github.com/claw-studio/L3_AI_BFF/model"
 	"github.com/claw-studio/L3_AI_BFF/pkg/validator"
 	"github.com/claw-studio/L3_AI_BFF/proxy"
+	"clawstudios/pkg/logging"
 	"github.com/gin-gonic/gin"
 )
 
@@ -19,16 +21,25 @@ func PublishTask(publishURL, sessionMgrURL, accountURL string) gin.HandlerFunc {
 		tid := c.Param("tid")
 		uidVal, _ := c.Get("uid")
 		roleVal, _ := c.Get("role")
-		log.Printf("[publish] received request tid=%s uid=%v role=%v", tid, uidVal, roleVal)
+
+		logger := middleware.GetBFFLogger(c)
+		if logger != nil {
+			logger.Info("收到发布请求 tid=%s uid=%v role=%v", tid, uidVal, roleVal)
+		}
+
 		if !validator.IsValidTaskID(tid) {
-			log.Printf("[publish] REJECT: invalid task_id format: %s", tid)
+			if logger != nil {
+				logger.Warn(logging.ErrInvalidParam, "发布请求: 任务ID格式不合法: %s", tid)
+			}
 			model.Error(c, model.ErrInvalidParam.WithDetail("任务 ID 格式不合法"))
 			return
 		}
 
 		var req model.PublishReq
 		if err := c.ShouldBindJSON(&req); err != nil {
-			log.Printf("[publish] REJECT: JSON bind error: %v", err)
+			if logger != nil {
+				logger.Warn(logging.ErrInvalidParam, "发布请求: JSON解析失败: %v", err)
+			}
 			model.Error(c, model.ErrInvalidParam.WithDetail("请求体格式错误"))
 			return
 		}
@@ -41,7 +52,9 @@ func PublishTask(publishURL, sessionMgrURL, accountURL string) gin.HandlerFunc {
 		platform := req.Platform
 
 		if len(req.Accounts) > 0 {
-			log.Printf("[publish] frontend specified accounts=%v", req.Accounts)
+			if logger != nil {
+				logger.Info("前端指定发布账号: %v", req.Accounts)
+			}
 			uidForLookup := bffUID.(string)
 			if bffRole == "admin" {
 				uidForLookup = ""
@@ -54,7 +67,9 @@ func PublishTask(publishURL, sessionMgrURL, accountURL string) gin.HandlerFunc {
 			for _, accID := range req.Accounts {
 				accPlatform, ok := userAccountSet[accID]
 				if bffRole != "admin" && !ok {
-					log.Printf("[publish] REJECT: account %s not in user set", accID)
+					if logger != nil {
+						logger.Warn(logging.ErrInvalidParam, "发布请求: 账号 %s 不属于当前用户", accID)
+					}
 					model.Error(c, model.ErrInvalidParam.WithDetail(
 						fmt.Sprintf("账号 %s 不属于当前用户或未绑定", accID)))
 					return
@@ -77,9 +92,13 @@ func PublishTask(publishURL, sessionMgrURL, accountURL string) gin.HandlerFunc {
 				uidForLookup = ""
 			}
 			realAccounts := fetchUserAccounts(accountURL, uidForLookup, platform)
-			log.Printf("[publish] fetchUserAccounts uid=%q platform=%q got=%d", uidForLookup, platform, len(realAccounts))
+			if logger != nil {
+				logger.Info("查询用户账号 uid=%q platform=%q 结果数=%d", uidForLookup, platform, len(realAccounts))
+			}
 			if len(realAccounts) == 0 {
-				log.Printf("[publish] REJECT: no accounts for uid=%q platform=%q", uidForLookup, platform)
+				if logger != nil {
+					logger.Warn(logging.ErrInvalidParam, "发布请求: uid=%q platform=%q 无可用账号", uidForLookup, platform)
+				}
 				model.Error(c, model.ErrInvalidParam.WithDetail(
 					fmt.Sprintf("没有绑定 %s 平台的账号，请先在账号配置页面绑定", platform)))
 				return
@@ -123,7 +142,17 @@ func PublishTask(publishURL, sessionMgrURL, accountURL string) gin.HandlerFunc {
 		}
 
 		if statusCode >= 200 && statusCode < 300 && sessionMgrURL != "" {
-			go updateTaskOnSessionMgr(sessionMgrURL, tid, req.NovelName, req.VolumeName, req.Title, req.ChapterNumber)
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						logger := middleware.GetBFFLogger(c)
+						if logger != nil {
+							logger.Error(logging.ErrInternal, "updateTaskOnSessionMgr panic: task=%s err=%v", tid, r)
+						}
+					}
+				}()
+				updateTaskOnSessionMgr(sessionMgrURL, tid, req.NovelName, req.VolumeName, req.Title, req.ChapterNumber)
+			}()
 		}
 
 		proxy.HandleDownstreamResponse(c, respBody, statusCode, "workflow", func(c *gin.Context, data []byte) {
@@ -165,11 +194,10 @@ func fetchUserAccounts(accountURL, uid, platform string) []accountInfo {
 func updateTaskOnSessionMgr(sessionMgrURL, taskID, novelName, volumeName, chapterTitle string, chapterNumber int) {
 	url := sessionMgrURL + "/api/task/" + taskID + "/update"
 	body := map[string]interface{}{
-		"novel_name":          novelName,
-		"volume_name":         volumeName,
-		"title":               chapterTitle,
-		"chapter_number":      chapterNumber,
-		"chapter_count_delta": 1,
+		"novel_name":     novelName,
+		"volume_name":    volumeName,
+		"title":          chapterTitle,
+		"chapter_number": chapterNumber,
 	}
 	data, err := json.Marshal(body)
 	if err != nil {
