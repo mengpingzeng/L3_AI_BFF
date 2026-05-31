@@ -26,10 +26,12 @@ var skipAuthPaths = map[string]bool{
 	"/healthz":           true,
 	"/api/models":        true,
 	"/api/auth/login":    true,
+	"/api/endpoints":     true,
 }
 
 var skipAuthPrefixes = []string{
 	"/ws/",
+	"/covers/",
 }
 
 func AuthRequired() gin.HandlerFunc {

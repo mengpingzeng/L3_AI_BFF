@@ -24,7 +24,7 @@ type publishHistoryResp struct {
 	Histories []publishHistoryItem `json:"histories"`
 }
 
-func GetPublishHistory(sessionMgrURL, workflowURL string) gin.HandlerFunc {
+func GetPublishHistory(sessionMgrURL, workflowURL, dashboardURL string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		logger := middleware.GetBFFLogger(c)
 		taskID := c.Query("task_id")
@@ -41,47 +41,55 @@ func GetPublishHistory(sessionMgrURL, workflowURL string) gin.HandlerFunc {
 			logger.Info("publish/history: start fetch task=%s", taskID)
 		}
 
-		// 1. 获取 Task 信息
-		taskURL := sessionMgrURL + "/api/task/" + taskID
-		taskBody, taskStatus, err := proxy.ForwardGet(c, taskURL)
-		if err != nil || taskStatus >= 400 {
-			if logger != nil {
-				logger.Error(logging.ErrNotFound,
-					"publish/history: get task upstream failed task=%s url=%s status=%d err=%v body=%s",
-					taskID, taskURL, taskStatus, err, truncate(taskBody, 500))
-			}
-			model.Error(c, model.ErrNotFound.WithDetail("任务不存在"))
-			return
+		// 1. 从 Dashboard 的 publish_record 获取真正发布过的 session_id 集合
+		dashBody := map[string]interface{}{
+			"taskId": taskID,
+			"size":   500,
 		}
-
-		var task struct {
-			VolumeName            string `json:"volume_name"`
-			PublishedChapterCount int    `json:"published_chapter_count"`
-			ActiveSessionID       string `json:"active_session_id"`
-		}
-		if err := json.Unmarshal(taskBody, &task); err != nil {
+		dashBodyBytes, dashStatus, err := proxy.Forward(c, dashboardURL+"/api/dashboard/query", dashBody)
+		if err != nil || dashStatus >= 400 {
 			if logger != nil {
-				logger.Error(logging.ErrMarshalError,
-					"publish/history: parse task failed task=%s err=%v raw=%s",
-					taskID, err, truncate(taskBody, 500))
+				logger.Error(logging.ErrDatabaseError,
+					"publish/history: dashboard query failed task=%s status=%d err=%v body=%s",
+					taskID, dashStatus, err, truncate(dashBodyBytes, 300))
 			}
 			model.Error(c, model.ErrInternal)
 			return
 		}
 
-		if logger != nil {
-			logger.Info("publish/history: task loaded task=%s published_chapter_count=%d active_session_id=%s",
-				taskID, task.PublishedChapterCount, task.ActiveSessionID)
+		var dashResp struct {
+			Items []struct {
+				SessionID   string `json:"sessionId"`
+				PublishedAt string `json:"publishedAt"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal(dashBodyBytes, &dashResp); err != nil {
+			if logger != nil {
+				logger.Error(logging.ErrMarshalError,
+					"publish/history: parse dashboard failed task=%s err=%v", taskID, err)
+			}
+			model.Error(c, model.ErrInternal)
+			return
 		}
 
-		// 2. 获取所有 Session
-		sessionsURL := sessionMgrURL + "/api/task/" + taskID + "/sessions"
-		sessionsBody, sessionsStatus, err := proxy.ForwardGet(c, sessionsURL)
+		// 按 session_id 去重 + 取最新的 published_at
+		publishedSessions := make(map[string]string)
+		for _, item := range dashResp.Items {
+			if item.SessionID == "" {
+				continue
+			}
+			if existing, ok := publishedSessions[item.SessionID]; !ok || item.PublishedAt > existing {
+				publishedSessions[item.SessionID] = item.PublishedAt
+			}
+		}
+
+		// 2. 获取所有 Session（用于匹配 chapter_number / volume_name / created_at）
+		sessionsBody, sessionsStatus, err := proxy.ForwardGet(c, sessionMgrURL+"/api/task/"+taskID+"/sessions")
 		if err != nil || sessionsStatus >= 400 {
 			if logger != nil {
 				logger.Error(logging.ErrDatabaseError,
-					"publish/history: get sessions upstream failed task=%s url=%s status=%d err=%v body=%s",
-					taskID, sessionsURL, sessionsStatus, err, truncate(sessionsBody, 500))
+					"publish/history: get sessions failed task=%s status=%d err=%v body=%s",
+					taskID, sessionsStatus, err, truncate(sessionsBody, 300))
 			}
 			model.Error(c, model.ErrInternal)
 			return
@@ -93,93 +101,39 @@ func GetPublishHistory(sessionMgrURL, workflowURL string) gin.HandlerFunc {
 		if err := json.Unmarshal(sessionsBody, &sessionsResp); err != nil {
 			if logger != nil {
 				logger.Error(logging.ErrMarshalError,
-					"publish/history: parse sessions failed task=%s err=%v raw=%s",
-					taskID, err, truncate(sessionsBody, 500))
+					"publish/history: parse sessions failed task=%s err=%v", taskID, err)
 			}
 			model.Error(c, model.ErrInternal)
 			return
 		}
 
-		totalSessions := len(sessionsResp.Sessions)
-
-		// 3. 获取 Workflow 发布状态（可选，用于补充活跃发布会话）
-		activeSid := task.ActiveSessionID
-		wfURL := workflowURL + "/api/task/" + taskID + "/status"
-		wfBody, wfStatus, wfErr := proxy.ForwardGet(c, wfURL)
-		if wfErr != nil || wfStatus >= 400 {
-			if logger != nil {
-				logger.Warn(logging.WarnServiceDegraded,
-					"publish/history: workflow status unavailable task=%s url=%s status=%d err=%v body=%s",
-					taskID, wfURL, wfStatus, wfErr, truncate(wfBody, 300))
-			}
-		} else {
-			var wf struct {
-				SessionID string `json:"session_id"`
-				Exists    bool   `json:"exists"`
-			}
-			if err := json.Unmarshal(wfBody, &wf); err != nil {
-				if logger != nil {
-					logger.Warn(logging.WarnServiceDegraded,
-						"publish/history: workflow status parse failed task=%s err=%v raw=%s",
-						taskID, err, truncate(wfBody, 300))
-				}
-			} else if wf.Exists && wf.SessionID != "" {
-				activeSid = wf.SessionID
-				if logger != nil {
-					logger.Info("publish/history: workflow active session task=%s session=%s", taskID, activeSid)
-				}
-			}
-		}
-
-		// 4. 按 PublishedChapterCount 过滤已发布的 session
-		publishedSet := make(map[string]bool)
-		matchedByChapter := 0
+		sessionMap := make(map[string]publishSessionRaw)
 		for _, s := range sessionsResp.Sessions {
-			if s.ChapterNumber > 0 && s.ChapterNumber <= task.PublishedChapterCount {
-				publishedSet[s.SessionID] = true
-				matchedByChapter++
-			}
-		}
-		if activeSid != "" {
-			if !publishedSet[activeSid] {
-				publishedSet[activeSid] = true
-				if logger != nil {
-					logger.Info("publish/history: added active session=%s not yet in published range", activeSid)
-				}
-			}
+			sessionMap[s.SessionID] = s
 		}
 
-		// 5. 组装结果
-		histories := make([]publishHistoryItem, 0, len(publishedSet))
-		var skippedZero, skippedNotPublished int
-		for _, s := range sessionsResp.Sessions {
-			if s.ChapterNumber == 0 {
-				skippedZero++
-				continue
+		// 3. 组装：对每个发布过的 session_id，从 SM 匹配时间信息
+		histories := make([]publishHistoryItem, 0, len(publishedSessions))
+		for sid, publishedAt := range publishedSessions {
+			item := publishHistoryItem{
+				SessionID:  sid,
+				FinishedAt: publishedAt,
 			}
-			if !publishedSet[s.SessionID] {
-				skippedNotPublished++
-				continue
+			if sm, ok := sessionMap[sid]; ok {
+				item.ChapterNumber = sm.ChapterNumber
+				item.VolumeName = sm.VolumeName
+				item.CreatedAt = sm.CreatedAt
 			}
-			histories = append(histories, publishHistoryItem{
-				SessionID:     s.SessionID,
-				ChapterNumber: s.ChapterNumber,
-				VolumeName:    s.VolumeName,
-				CreatedAt:     s.CreatedAt,
-				FinishedAt:    s.ArchivedAt,
-			})
+			histories = append(histories, item)
 		}
 
 		sort.Slice(histories, func(i, j int) bool {
 			return histories[i].ChapterNumber > histories[j].ChapterNumber
 		})
 
-		uid, _ := c.Get("uid")
 		if logger != nil {
-			logger.Info("publish/history: done task=%s total_sessions=%d filtered=%d (chapter_limit=%d, matched=%d, active_added=%v) skipped_zero=%d skipped_not_published=%d final=%d uid=%v",
-				taskID, totalSessions, len(histories),
-				task.PublishedChapterCount, matchedByChapter, activeSid != "" && activeSid != task.ActiveSessionID,
-				skippedZero, skippedNotPublished, len(histories), uid)
+			logger.Info("publish/history: done task=%s published_sessions=%d matched_sm=%d final=%d",
+				taskID, len(publishedSessions), len(sessionMap), len(histories))
 		}
 
 		model.Success(c, publishHistoryResp{

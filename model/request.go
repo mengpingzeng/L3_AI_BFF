@@ -1,12 +1,14 @@
 package model
 
 type CreateTaskReq struct {
-	Topic        string   `json:"topic"`
-	Platform     string   `json:"platform"`
-	AccountIDs   []string `json:"account_ids"`
-	SkillID      string   `json:"skill_id"`
-	SkillVersion string   `json:"skillVer"`
-	Model        string   `json:"model"`
+	Topic         string   `json:"topic"`
+	NovelName     string   `json:"name,omitempty"`
+	Platform      string   `json:"platform"`
+	AccountIDs    []string `json:"account_ids"`
+	SkillID       string   `json:"skill_id"`
+	SkillVersion  string   `json:"skillVer"`
+	Model         string   `json:"model"`
+	IsAutoPublish bool     `json:"is_auto_publish"`
 }
 
 type CreateSessionReq struct {
@@ -22,8 +24,10 @@ type CreateSessionReq struct {
 }
 
 type SendMessageReq struct {
-	Text         string `json:"text"`
-	DraftVersion int    `json:"draft_version"`
+	Text            string `json:"text"`
+	DraftVersion    int    `json:"draft_version"`
+	TargetSessionID string `json:"target_session_id,omitempty"`
+	Mode            string `json:"mode,omitempty"`
 }
 
 type PublishReq struct {
@@ -55,6 +59,7 @@ type AutoPublishStartReq struct {
 	Platform   string   `json:"platform"`
 	Accounts   []string `json:"accounts,omitempty"`
 	SkillID    string   `json:"skill_id,omitempty"`
+	Model      string   `json:"model,omitempty"`
 	Topic      string   `json:"topic,omitempty"`
 	NovelName  string   `json:"novel_name,omitempty"`
 	VolumeName string   `json:"volume_name,omitempty"`

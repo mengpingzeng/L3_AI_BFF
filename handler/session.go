@@ -9,7 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func CreateSession(sessionURL string) gin.HandlerFunc {
+func CreateSession(sessionURL string, autoPubMgr *AutoPublishManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req model.CreateSessionReq
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -20,6 +20,11 @@ func CreateSession(sessionURL string) gin.HandlerFunc {
 		vr := validator.ValidateCreateSession(req.TaskID)
 		if !vr.Valid {
 			model.Error(c, model.ErrInvalidParam.WithDetail(vr.Errors))
+			return
+		}
+
+		if autoPubMgr != nil && autoPubMgr.IsAutoPublishActive(req.TaskID) {
+			model.Error(c, model.ErrConflict.WithDetail("全自动发布任务无需手动创建会话，系统将自动处理"))
 			return
 		}
 

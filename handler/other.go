@@ -117,6 +117,22 @@ func AccountProxyPost(accountURL string) gin.HandlerFunc {
 	}
 }
 
+func CoverProxy(skillURL string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		respBody, statusCode, err := proxy.ForwardGet(c, skillURL+c.Request.URL.Path)
+		if err != nil {
+			model.Error(c, model.ErrUpstreamUnavailable.WithDetail(err.Error()))
+			return
+		}
+		if statusCode >= 300 {
+			c.Status(statusCode)
+			return
+		}
+		c.Header("Content-Type", "image/png")
+		c.Data(200, "image/png", respBody)
+	}
+}
+
 func SkillProxy(skillURL string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		respBody, statusCode, err := proxy.ForwardGet(c, skillURL+c.Request.URL.Path)

@@ -26,6 +26,7 @@ type bookChapter struct {
 	Title         string `json:"title,omitempty"`
 	Status        string `json:"status"`
 	DraftVersion  int    `json:"draft_version"`
+	Published     bool   `json:"published"`
 	CreatedAt     string `json:"created_at"`
 	ArchivedAt    string `json:"archived_at,omitempty"`
 }
@@ -45,10 +46,11 @@ func BookGetInfo(sessionMgrURL string) gin.HandlerFunc {
 		}
 
 		var task struct {
-			NovelName     string `json:"novel_name"`
-			VolumeName    string `json:"volume_name"`
-			ChapterNumber int    `json:"chapter_number"`
-			SessionCount  int    `json:"session_count"`
+			NovelName              string `json:"novel_name"`
+			VolumeName             string `json:"volume_name"`
+			ChapterNumber          int    `json:"chapter_number"`
+			SessionCount           int    `json:"session_count"`
+			PublishedChapterCount  int    `json:"published_chapter_count"`
 		}
 		if err := json.Unmarshal(taskData, &task); err != nil {
 			if logger != nil {
@@ -79,7 +81,11 @@ func BookGetInfo(sessionMgrURL string) gin.HandlerFunc {
 			return
 		}
 
-		volumes := buildVolumeTree(sessionsResp.Sessions)
+		validSessions := filterValidSessions(sessionsResp.Sessions)
+
+		pubCount := task.PublishedChapterCount
+
+		volumes := buildVolumeTree(validSessions, pubCount)
 
 		hasUnclassified := false
 		for i := range volumes {
@@ -126,13 +132,31 @@ type bookChapterRaw struct {
 	SessionID     string `json:"session_id"`
 	Status        string `json:"status"`
 	DraftVersion  int    `json:"draft_version"`
+	DraftSize     int64  `json:"draft_size,omitempty"`
 	VolumeName    string `json:"volume_name"`
 	ChapterNumber int    `json:"chapter_number"`
 	CreatedAt     string `json:"created_at"`
 	ArchivedAt    string `json:"archived_at,omitempty"`
 }
 
-func buildVolumeTree(sessions []bookChapterRaw) []bookVolume {
+func filterValidSessions(sessions []bookChapterRaw) []bookChapterRaw {
+	var result []bookChapterRaw
+	for _, s := range sessions {
+		if s.Status == "CREATED" || s.Status == "GENERATING" {
+			continue
+		}
+		if s.ChapterNumber == 0 {
+			continue
+		}
+		if s.DraftSize == 0 {
+			continue
+		}
+		result = append(result, s)
+	}
+	return result
+}
+
+func buildVolumeTree(sessions []bookChapterRaw, publishedChapterCount int) []bookVolume {
 	volMap := make(map[string][]bookChapter)
 	volOrder := make([]string, 0)
 	seen := make(map[string]bool)
@@ -144,6 +168,7 @@ func buildVolumeTree(sessions []bookChapterRaw) []bookVolume {
 			SessionID:     s.SessionID,
 			Status:        s.Status,
 			DraftVersion:  s.DraftVersion,
+			Published:     s.ChapterNumber <= publishedChapterCount,
 			CreatedAt:     s.CreatedAt,
 			ArchivedAt:    s.ArchivedAt,
 		})

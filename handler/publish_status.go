@@ -10,11 +10,12 @@ import (
 )
 
 type publishStatusData struct {
-	LatestVolumeName       string `json:"latest_volume_name"`
-	LatestChapterNumber    int    `json:"latest_chapter_number"`
-	ActiveSessionID        string `json:"active_session_id"`
-	PublishStatus          string `json:"publish_status"`
-	IsAutoPublishRunning   bool   `json:"is_auto_publish_running"`
+	LatestVolumeName           string `json:"latest_volume_name"`
+	LatestChapterNumber        int    `json:"latest_chapter_number"`
+	LatestPublishedSessionID   string `json:"latest_published_session_id"`
+	ActiveSessionID            string `json:"active_session_id"`
+	PublishStatus              string `json:"publish_status"`
+	IsAutoPublishRunning       bool   `json:"is_auto_publish_running"`
 }
 
 func (m *AutoPublishManager) GetPublishStatus() gin.HandlerFunc {
@@ -43,9 +44,8 @@ func (m *AutoPublishManager) GetPublishStatus() gin.HandlerFunc {
 		}
 
 		var task struct {
-			VolumeName            string `json:"volume_name"`
-			PublishedChapterCount int    `json:"published_chapter_count"`
-			ActiveSessionID       string `json:"active_session_id"`
+			VolumeName      string `json:"volume_name"`
+			ActiveSessionID string `json:"active_session_id"`
 		}
 		if err := json.Unmarshal(taskData, &task); err != nil {
 			if logger != nil {
@@ -55,24 +55,32 @@ func (m *AutoPublishManager) GetPublishStatus() gin.HandlerFunc {
 			return
 		}
 
-		publishStatus := mapWorkflowStatus(taskID, m)
+		wfStatus, wfSessionID, wfChapterNum, wfVolumeName := mapWorkflowStatus(taskID, m)
 		if logger != nil {
-			logger.Info("publish/get_status: workflow status: task=%s status=%s", taskID, publishStatus)
+			logger.Info("publish/get_status: workflow status: task=%s status=%s session=%s chapter=%d volume=%s",
+				taskID, wfStatus, wfSessionID, wfChapterNum, wfVolumeName)
 		}
 
 		isRunning := m.isAutoPublishRunning(taskID)
 
+		volumeName := wfVolumeName
+		if volumeName == "" {
+			volumeName = task.VolumeName
+		}
+
 		data := publishStatusData{
-			LatestVolumeName:       task.VolumeName,
-			LatestChapterNumber:    task.PublishedChapterCount,
-			ActiveSessionID:        task.ActiveSessionID,
-			PublishStatus:          publishStatus,
-			IsAutoPublishRunning:   isRunning,
+			LatestVolumeName:         volumeName,
+			LatestChapterNumber:      wfChapterNum,
+			LatestPublishedSessionID: wfSessionID,
+			ActiveSessionID:          task.ActiveSessionID,
+			PublishStatus:            wfStatus,
+			IsAutoPublishRunning:     isRunning,
 		}
 
 		if logger != nil {
-			logger.Info("publish/get_status: response task=%s volume=%s chapter=%d status=%s active_session=%s auto_running=%v",
-				taskID, data.LatestVolumeName, data.LatestChapterNumber, data.PublishStatus, data.ActiveSessionID, data.IsAutoPublishRunning)
+			logger.Info("publish/get_status: response task=%s volume=%s chapter=%d session=%s status=%s active_session=%s auto_running=%v",
+				taskID, data.LatestVolumeName, data.LatestChapterNumber, data.LatestPublishedSessionID,
+				data.PublishStatus, data.ActiveSessionID, data.IsAutoPublishRunning)
 		}
 
 		model.Success(c, data)
@@ -91,29 +99,36 @@ func (m *AutoPublishManager) isAutoPublishRunning(taskID string) bool {
 	return job.Status == "running" || job.Status == "finishing"
 }
 
-func mapWorkflowStatus(taskID string, m *AutoPublishManager) string {
+func mapWorkflowStatus(taskID string, m *AutoPublishManager) (status string, sessionID string, chapterNum int, volumeName string) {
 	respBody, err := m.doGet(m.workflowURL + "/api/task/" + taskID + "/status")
 	if err != nil {
-		return "idle"
+		return "idle", "", 0, ""
 	}
 
-	var wfStatus struct {
-		Status string `json:"status"`
-		Exists bool   `json:"exists"`
+	var wf struct {
+		Status        string `json:"status"`
+		SessionID     string `json:"session_id"`
+		ChapterNumber int    `json:"chapter_number"`
+		VolumeName    string `json:"volume_name"`
+		Exists        bool   `json:"exists"`
 	}
-	if err := json.Unmarshal(respBody, &wfStatus); err != nil {
-		return "idle"
+	if err := json.Unmarshal(respBody, &wf); err != nil {
+		return "idle", "", 0, ""
 	}
-	if !wfStatus.Exists || wfStatus.Status == "" {
-		return "idle"
+	if !wf.Exists || wf.Status == "" {
+		return "idle", "", 0, ""
 	}
 
-	switch wfStatus.Status {
-	case "publishing":
-		return "publishing"
+	switch wf.Status {
+	case "publishing", "fetch_draft", "published", "md_writing", "md_written":
+		return "publishing", wf.SessionID, wf.ChapterNumber, wf.VolumeName
+	case "done":
+		return "done", wf.SessionID, wf.ChapterNumber, wf.VolumeName
+	case "done_partial":
+		return "done_partial", wf.SessionID, wf.ChapterNumber, wf.VolumeName
 	case "failed_gen", "failed_md", "published_failed":
-		return "failed"
+		return "failed", wf.SessionID, wf.ChapterNumber, wf.VolumeName
 	default:
-		return "idle"
+		return "idle", wf.SessionID, wf.ChapterNumber, wf.VolumeName
 	}
 }

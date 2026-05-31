@@ -1,7 +1,10 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
 
 	"github.com/claw-studio/L3_AI_BFF/middleware"
 	"github.com/claw-studio/L3_AI_BFF/model"
@@ -38,7 +41,7 @@ type publishSessionAcct struct {
 	Platform  string `json:"platform"`
 }
 
-func GetPublishSession(sessionMgrURL, workflowURL string) gin.HandlerFunc {
+func GetPublishSession(sessionMgrURL, workflowURL, dashboardURL string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		logger := middleware.GetBFFLogger(c)
 		taskID := c.Query("task_id")
@@ -63,137 +66,150 @@ func GetPublishSession(sessionMgrURL, workflowURL string) gin.HandlerFunc {
 			logger.Info("publish/session: start task=%s platform_sess=%s", taskID, platformSessID)
 		}
 
+		// 1. 先查 WF：如果当前/最近 WF 任务的 session_id 匹配，直接返回 WF 数据
 		wfURL := workflowURL + "/api/task/" + taskID + "/status"
 		wfBody, wfStatus, wfErr := proxy.ForwardGet(c, wfURL)
 
-		if wfErr != nil || wfStatus >= 400 {
-			if logger != nil {
-				logger.Error(logging.ErrExternalService,
-					"publish/session: workflow status failed task=%s url=%s status=%d err=%v body=%s",
-					taskID, wfURL, wfStatus, wfErr, truncate(wfBody, 500))
+		if wfErr == nil && wfStatus < 400 {
+			var wfTask struct {
+				TaskID         string                 `json:"task_id"`
+				Status         string                 `json:"status"`
+				SessionID      string                 `json:"session_id"`
+				VolumeName     string                 `json:"volume_name"`
+				ChapterNumber  int                    `json:"chapter_number"`
+				ErrorMsg       string                 `json:"error_msg"`
+				PublishResults []publishSessionResult `json:"publish_results"`
+				Accounts       []publishSessionAcct   `json:"accounts"`
+				CreatedAt      string                 `json:"created_at"`
+				UpdatedAt      string                 `json:"updated_at"`
+				Exists         bool                   `json:"exists"`
 			}
-			model.Error(c, model.ErrInternal)
-			return
+			if json.Unmarshal(wfBody, &wfTask) == nil && wfTask.Exists && wfTask.SessionID == platformSessID {
+				finishedAt := wfTask.UpdatedAt
+				if isTerminalPub(wfTask.Status) && finishedAt == "" {
+					finishedAt = wfTask.CreatedAt
+				}
+				if logger != nil {
+					total := len(wfTask.PublishResults)
+					okCount := countOK(wfTask.PublishResults)
+					logger.Info("publish/session: matched workflow task=%s session=%s status=%s platforms=%d ok=%d fail=%d source=workflow",
+						taskID, platformSessID, wfTask.Status, total, okCount, total-okCount)
+				}
+				model.Success(c, publishSessionResp{
+					TaskID:         taskID,
+					PlatformSessID: platformSessID,
+					ChapterNumber:  wfTask.ChapterNumber,
+					VolumeName:     wfTask.VolumeName,
+					Status:         wfTask.Status,
+					CreatedAt:      wfTask.CreatedAt,
+					FinishedAt:     finishedAt,
+					PublishResults: wfTask.PublishResults,
+					Accounts:       wfTask.Accounts,
+					Source:         "workflow",
+				})
+				return
+			}
 		}
 
-		var wfTask struct {
-			TaskID         string                 `json:"task_id"`
-			Status         string                 `json:"status"`
-			SessionID      string                 `json:"session_id"`
-			VolumeName     string                 `json:"volume_name"`
-			ChapterNumber  int                    `json:"chapter_number"`
-			ErrorMsg       string                 `json:"error_msg"`
-			PublishResults []publishSessionResult `json:"publish_results"`
-			Accounts       []publishSessionAcct   `json:"accounts"`
-			CreatedAt      string                 `json:"created_at"`
-			UpdatedAt      string                 `json:"updated_at"`
-			Exists         bool                   `json:"exists"`
-		}
-		if err := json.Unmarshal(wfBody, &wfTask); err != nil {
-			if logger != nil {
-				logger.Error(logging.ErrMarshalError,
-					"publish/session: parse workflow status failed task=%s err=%v raw=%s",
-					taskID, err, truncate(wfBody, 500))
-			}
-			model.Error(c, model.ErrInternal)
-			return
-		}
-
-		if !wfTask.Exists {
-			if logger != nil {
-				logger.Info("publish/session: no workflow task exists for task=%s, fallback to session_mgr", taskID)
-			}
-			resp := buildHistResp(logger, sessionMgrURL, taskID, platformSessID)
-			model.Success(c, resp)
-			return
-		}
-
-		// workflow_task.session_id 匹配 → 当前/最近的发布会话
-		if wfTask.SessionID == platformSessID {
-			if logger != nil {
-				logger.Info("publish/session: matched active workflow task=%s session=%s status=%s",
-					taskID, platformSessID, wfTask.Status)
-			}
-
-			finishedAt := wfTask.UpdatedAt
-			if isTerminalPub(wfTask.Status) && finishedAt == "" {
-				finishedAt = wfTask.CreatedAt
-			}
-
-			uid, _ := c.Get("uid")
-			if logger != nil {
-				total := len(wfTask.PublishResults)
-				okCount := countOK(wfTask.PublishResults)
-				logger.Info("publish/session: done task=%s session=%s status=%s platforms=%d ok=%d fail=%d source=workflow uid=%v",
-					taskID, platformSessID, wfTask.Status, total, okCount, total-okCount, uid)
-			}
-
-			model.Success(c, publishSessionResp{
-				TaskID:         taskID,
-				PlatformSessID: platformSessID,
-				ChapterNumber:  wfTask.ChapterNumber,
-				VolumeName:     wfTask.VolumeName,
-				Status:         wfTask.Status,
-				CreatedAt:      wfTask.CreatedAt,
-				FinishedAt:     finishedAt,
-				PublishResults: wfTask.PublishResults,
-				Accounts:       wfTask.Accounts,
-				Source:         "workflow",
-			})
-			return
-		}
-
-		// 不匹配 → 历史发布会话, 从 Session Mgr 补数据
+		// 2. WF 不匹配或不可用 → 回退到 publish_record 查历史
 		if logger != nil {
-			logger.Info("publish/session: session mismatch, fallback to session_mgr: task=%s platform_sess=%s wf_sess=%s",
-				taskID, platformSessID, wfTask.SessionID)
+			logger.Info("publish/session: fallback to publish_record task=%s session=%s", taskID, platformSessID)
 		}
 
-		resp := buildHistResp(logger, sessionMgrURL, taskID, platformSessID)
+		resp := buildDashboardFallbackResp(logger, sessionMgrURL, dashboardURL, taskID, platformSessID)
 		model.Success(c, resp)
 	}
 }
 
-func buildHistResp(logger *logging.Logger, sessionMgrURL, taskID, platformSessID string) publishSessionResp {
+func buildDashboardFallbackResp(logger *logging.Logger, sessionMgrURL, dashboardURL, taskID, platformSessID string) publishSessionResp {
 	resp := publishSessionResp{
 		TaskID:         taskID,
 		PlatformSessID: platformSessID,
 		Status:         "published",
-		Source:         "session_mgr",
+		Source:         "publish_record",
 	}
 
-	sessionsBody, err := doDownstreamGet(sessionMgrURL + "/api/task/" + taskID + "/sessions")
-	if err != nil {
-		if logger != nil {
-			logger.Warn(logging.WarnServiceDegraded,
-				"publish/session: get sessions for history failed task=%s err=%v", taskID, err)
+	// 查 Dashboard 获取发布到各平台/账号的记录
+	type dashItem struct {
+		AccountID   string `json:"accountId"`
+		Platform    string `json:"platform"`
+		PostID      string `json:"postId"`
+		LoginName   string `json:"loginName"`
+		PublishedAt string `json:"publishedAt"`
+	}
+
+	dashBody := map[string]interface{}{
+		"taskId":     taskID,
+		"sessionIds": []string{platformSessID},
+		"size":       200,
+	}
+	dashBytes, dashStatus, dashErr := postJSON(dashboardURL+"/api/dashboard/query", dashBody)
+
+	if dashErr == nil && dashStatus < 400 {
+		var dashResp struct {
+			Items []dashItem `json:"items"`
 		}
-		return resp
-	}
-
-	var sessionsResp struct {
-		Sessions []publishSessionRaw `json:"sessions"`
-	}
-	if err := json.Unmarshal(sessionsBody, &sessionsResp); err != nil {
-		if logger != nil {
-			logger.Warn(logging.WarnServiceDegraded,
-				"publish/session: parse sessions for history failed task=%s err=%v", taskID, err)
-		}
-		return resp
-	}
-
-	for _, s := range sessionsResp.Sessions {
-		if s.SessionID == platformSessID {
-			resp.ChapterNumber = s.ChapterNumber
-			resp.VolumeName = s.VolumeName
-			resp.CreatedAt = s.CreatedAt
-			resp.FinishedAt = s.ArchivedAt
-			if logger != nil {
-				logger.Info("publish/session: historical session task=%s session=%s chapter=%d source=session_mgr",
-					taskID, platformSessID, s.ChapterNumber)
+		if json.Unmarshal(dashBytes, &dashResp) == nil && len(dashResp.Items) > 0 {
+			seen := make(map[string]bool)
+			for _, item := range dashResp.Items {
+				resp.PublishResults = append(resp.PublishResults, publishSessionResult{
+					AccountID:     item.AccountID,
+					Platform:      item.Platform,
+					Status:        "ok",
+					PostID:        item.PostID,
+					MaskedDisplay: item.LoginName,
+				})
+				if !seen[item.AccountID] {
+					seen[item.AccountID] = true
+					resp.Accounts = append(resp.Accounts, publishSessionAcct{
+						AccountID: item.AccountID,
+						Platform:  item.Platform,
+					})
+				}
+				if resp.FinishedAt == "" || item.PublishedAt > resp.FinishedAt {
+					resp.FinishedAt = item.PublishedAt
+				}
 			}
-			break
+			resp.Status = "done"
+			if logger != nil {
+				logger.Info("publish/session: found in publish_record task=%s session=%s results=%d",
+					taskID, platformSessID, len(resp.PublishResults))
+			}
+		} else if logger != nil {
+			logger.Warn(logging.WarnServiceDegraded,
+				"publish/session: session not found in publish_record task=%s session=%s", taskID, platformSessID)
 		}
+	} else if logger != nil {
+		logger.Warn(logging.WarnServiceDegraded,
+			"publish/session: dashboard query failed task=%s session=%s err=%v", taskID, platformSessID, dashErr)
+	}
+
+	// 从 SM 补 session 时间信息
+	sessionsBody, err := doDownstreamGet(sessionMgrURL + "/api/task/" + taskID + "/sessions")
+	if err == nil {
+		var sessionsResp struct {
+			Sessions []publishSessionRaw `json:"sessions"`
+		}
+		if json.Unmarshal(sessionsBody, &sessionsResp) == nil {
+			for _, s := range sessionsResp.Sessions {
+				if s.SessionID == platformSessID {
+					resp.ChapterNumber = s.ChapterNumber
+					resp.VolumeName = s.VolumeName
+					if resp.CreatedAt == "" {
+						resp.CreatedAt = s.CreatedAt
+					}
+					if resp.FinishedAt == "" {
+						resp.FinishedAt = s.ArchivedAt
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// 确实没找到任何发布记录 → 未发布
+	if len(resp.PublishResults) == 0 {
+		resp.Status = "unpublished"
 	}
 
 	return resp
@@ -215,4 +231,21 @@ func countOK(results []publishSessionResult) int {
 		}
 	}
 	return n
+}
+
+func postJSON(url string, body map[string]interface{}) ([]byte, int, error) {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := http.Post(url, "application/json", bytes.NewReader(data))
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return respBody, resp.StatusCode, nil
 }

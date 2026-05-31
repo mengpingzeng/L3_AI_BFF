@@ -12,6 +12,38 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+type providerEntry struct {
+	APIKey  string `json:"api_key"`
+	BaseURL string `json:"base_url"`
+}
+
+type opencodeConfig struct {
+	Provider map[string]providerEntry `json:"provider"`
+}
+
+func readDeepSeekConfig() (apiKey, baseURL string) {
+	configPath := os.Getenv("OPENCODE_CONFIG_PATH")
+	if configPath == "" {
+		configPath = "/tmp/sm_demo/opencode_config.json"
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", ""
+	}
+	var cfg opencodeConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return "", ""
+	}
+	if p, ok := cfg.Provider["team-deepseek"]; ok && p.APIKey != "" {
+		apiKey = p.APIKey
+		baseURL = p.BaseURL
+	}
+	if baseURL == "" {
+		baseURL = "https://api.deepseek.com/v1"
+	}
+	return
+}
+
 const novelTitleSystemPrompt = `你是一个专业的网文书名创作专家。请根据用户提供的小说设定，生成3-5个候选书名。
 
 要求：
@@ -61,10 +93,10 @@ func NovelTitleSuggest() gin.HandlerFunc {
 			return
 		}
 
-		apiKey := os.Getenv("TEAM_DEEPSEEK_API_KEY")
-		baseURL := os.Getenv("DEEPSEEK_BASE_URL")
-		if baseURL == "" {
-			baseURL = "https://api.deepseek.com/v1"
+		apiKey, baseURL := readDeepSeekConfig()
+		if apiKey == "" {
+			model.Error(c, model.ErrInternal.WithDetail("AI Provider 未配置 API Key"))
+			return
 		}
 
 		payload := openAIRequest{

@@ -45,15 +45,7 @@ func ValidateCreateTask(topic, skillID, model, platform string) ValidationResult
 	var r ValidationResult
 	r.Valid = true
 
-	if strings.TrimSpace(topic) == "" {
-		r.Add("topic", "主题不能为空")
-	} else if utf8.RuneCountInString(topic) > 500 {
-		r.Add("topic", "主题不能超过500个字符")
-	} else if containsControl(topic) {
-		r.Add("topic", "主题包含非法字符")
-	}
-
-	if !reSkillID.MatchString(skillID) {
+	if skillID != "" && !reSkillID.MatchString(skillID) {
 		r.Add("skill_id", "写作风格 ID 格式不合法")
 	}
 

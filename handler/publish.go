@@ -123,7 +123,7 @@ func PublishTask(publishURL, sessionMgrURL, accountURL string) gin.HandlerFunc {
 			"accounts":      accounts,
 			"skillId":       req.SkillID,
 			"topic":         req.Topic,
-			"taskId":        tid,
+			"taskId":        tid + "_" + req.SessionID,
 			"novelName":     req.NovelName,
 			"title":         req.Title,
 			"volumeName":    req.VolumeName,
