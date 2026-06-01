@@ -683,6 +683,32 @@ func (m *AutoPublishManager) generateChapter(job *AutoPublishJob, isFinale bool)
 
 	m.updateTaskChapterNumber(job, chapterTitle, nextChapter)
 
+	// ⑤ 从草稿箱推发布
+	log.Printf("[auto_publish] task=%s 从草稿箱推发布 title=%s chapter=%d", taskID, chapterTitle, nextChapter)
+
+	platformInfo2, pubErr2 := m.fanqieAdapter.GetPlatformInfo(job.ctx(), novelName, cred, job.WorkID)
+	var draftItemID string
+	if pubErr2 != nil {
+		log.Printf("[auto_publish] task=%s 获取平台状态失败(发布前): %s", taskID, pubErr2.ErrorMessage)
+	} else {
+		for _, d := range platformInfo2.Drafts {
+				if d.ChapterNumber == nextChapter {
+					draftItemID = d.ItemID
+					break
+				}
+			}
+	}
+
+	pubResult := m.fanqieAdapter.PublishDraft(job.ctx(), chapterTitle, novelName, nextVolume, cred, job.WorkID, draftItemID)
+	if pubResult.Status != "ok" {
+		log.Printf("[auto_publish] task=%s 发布草稿失败: %s (code=%s)", taskID, pubResult.ErrorMessage, pubResult.ErrorCode)
+		return fmt.Errorf("publish draft: %s (code=%s)", pubResult.ErrorMessage, pubResult.ErrorCode)
+	}
+
+	log.Printf("[auto_publish] task=%s 发布草稿成功: title=%s postId=%s", taskID, chapterTitle, pubResult.PostID)
+
+	m.updatePublishedCount(job)
+
 	log.Printf("[auto_publish] task=%s ===== 章节生成完成 chapter=%d =====", taskID, nextChapter)
 	return nil
 }
@@ -970,6 +996,14 @@ func (m *AutoPublishManager) updateTaskChapterNumber(job *AutoPublishJob, chapte
 		return
 	}
 	log.Printf("[auto_publish] task=%s 章节号已推进至%d: %s", job.TaskID, chapterNumber, string(respBody))
+}
+
+func (m *AutoPublishManager) updatePublishedCount(job *AutoPublishJob) {
+	url := fmt.Sprintf("%s/api/task/%s/update", m.sessionMgrURL, job.TaskID)
+	body := map[string]interface{}{
+		"chapter_count_delta": 1,
+	}
+	m.doPost(url, body)
 }
 
 func (m *AutoPublishManager) executeFinish(taskID, userID string, taskInfo *taskInfoData) {
