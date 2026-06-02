@@ -26,6 +26,7 @@ type bookChapter struct {
 	Title         string `json:"title,omitempty"`
 	Status        string `json:"status"`
 	DraftVersion  int    `json:"draft_version"`
+	Phase         string `json:"phase"`
 	Published     bool   `json:"published"`
 	CreatedAt     string `json:"created_at"`
 	ArchivedAt    string `json:"archived_at,omitempty"`
@@ -81,11 +82,9 @@ func BookGetInfo(sessionMgrURL string) gin.HandlerFunc {
 			return
 		}
 
-		validSessions := filterValidSessions(sessionsResp.Sessions)
+	validSessions := filterValidSessions(sessionsResp.Sessions)
 
-		pubCount := task.PublishedChapterCount
-
-		volumes := buildVolumeTree(validSessions, pubCount)
+	volumes := buildVolumeTree(validSessions)
 
 		hasUnclassified := false
 		for i := range volumes {
@@ -133,6 +132,7 @@ type bookChapterRaw struct {
 	Status        string `json:"status"`
 	DraftVersion  int    `json:"draft_version"`
 	DraftSize     int64  `json:"draft_size,omitempty"`
+	PostID        string `json:"post_id,omitempty"`
 	VolumeName    string `json:"volume_name"`
 	ChapterNumber int    `json:"chapter_number"`
 	CreatedAt     string `json:"created_at"`
@@ -156,19 +156,24 @@ func filterValidSessions(sessions []bookChapterRaw) []bookChapterRaw {
 	return result
 }
 
-func buildVolumeTree(sessions []bookChapterRaw, publishedChapterCount int) []bookVolume {
+func buildVolumeTree(sessions []bookChapterRaw) []bookVolume {
 	volMap := make(map[string][]bookChapter)
 	volOrder := make([]string, 0)
 	seen := make(map[string]bool)
 
 	chapters := make([]bookChapter, 0, len(sessions))
 	for _, s := range sessions {
+		phase := "draft"
+		if s.PostID != "" {
+			phase = "published"
+		}
 		chapters = append(chapters, bookChapter{
 			ChapterNumber: s.ChapterNumber,
 			SessionID:     s.SessionID,
 			Status:        s.Status,
 			DraftVersion:  s.DraftVersion,
-			Published:     s.ChapterNumber <= publishedChapterCount,
+			Phase:         phase,
+			Published:     phase == "published",
 			CreatedAt:     s.CreatedAt,
 			ArchivedAt:    s.ArchivedAt,
 		})

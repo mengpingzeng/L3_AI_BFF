@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -514,6 +515,7 @@ func (m *AutoPublishManager) autoPublishLoop(job *AutoPublishJob) {
 
 		if err := m.generateChapter(job, false); err != nil {
 			log.Printf("[auto_publish] task=%s 章节生成/发布失败: %v, 1分钟后重试", job.TaskID, err)
+
 			select {
 			case <-job.stopCh:
 				m.updateJobStatus(job.TaskID, "stopped")
@@ -526,6 +528,14 @@ func (m *AutoPublishManager) autoPublishLoop(job *AutoPublishJob) {
 				m.updateJobStatus(job.TaskID, "completed")
 				return
 			case <-time.After(1 * time.Minute):
+			}
+
+			var pubErr *publishRetryError
+			if errors.As(err, &pubErr) {
+				log.Printf("[auto_publish] task=%s 仅重试发布步骤 draftItemID=%s chapter=%s", job.TaskID, pubErr.draftItemID, pubErr.chapterTitle)
+				if retryErr := m.retryPublishOnly(job, pubErr.sessionID, pubErr.draftItemID, pubErr.chapterTitle, pubErr.volume); retryErr != nil {
+					log.Printf("[auto_publish] task=%s 重试发布仍失败: %v, 跳过此章", job.TaskID, retryErr)
+				}
 			}
 			continue
 		}
@@ -702,12 +712,23 @@ func (m *AutoPublishManager) generateChapter(job *AutoPublishJob, isFinale bool)
 	pubResult := m.fanqieAdapter.PublishDraft(job.ctx(), chapterTitle, novelName, nextVolume, cred, job.WorkID, draftItemID)
 	if pubResult.Status != "ok" {
 		log.Printf("[auto_publish] task=%s 发布草稿失败: %s (code=%s)", taskID, pubResult.ErrorMessage, pubResult.ErrorCode)
-		return fmt.Errorf("publish draft: %s (code=%s)", pubResult.ErrorMessage, pubResult.ErrorCode)
+		return &publishRetryError{
+			sessionID:    sessionID,
+			draftItemID:  draftItemID,
+			chapterTitle: chapterTitle,
+			volume:       nextVolume,
+			err:          fmt.Errorf("publish draft: %s (code=%s)", pubResult.ErrorMessage, pubResult.ErrorCode),
+		}
 	}
 
 	log.Printf("[auto_publish] task=%s 发布草稿成功: title=%s postId=%s", taskID, chapterTitle, pubResult.PostID)
 
-	m.updatePublishedCount(job)
+	if pubResult.PostID != "" && pubResult.PostID != job.WorkID {
+		m.updatePublishedCount(job)
+		m.saveSessionPostID(job.TaskID, sessionID, pubResult.PostID)
+	} else {
+		log.Printf("[auto_publish] task=%s postId 无效(workId=%s)，跳过发布计数", taskID, job.WorkID)
+	}
 
 	log.Printf("[auto_publish] task=%s ===== 章节生成完成 chapter=%d =====", taskID, nextChapter)
 	return nil
@@ -826,11 +847,13 @@ func (m *AutoPublishManager) wakeTask(job *AutoPublishJob, isFinale bool) (strin
 	volName := job.VolumeName
 	novelName := job.NovelName
 	draftVer := job.DraftVersion
+	skillID := job.SkillID
 	job.mu.Unlock()
 
 	body := map[string]interface{}{
 		"is_finale":      isFinale,
 		"draft_version":  draftVer,
+		"skill_id":       skillID,
 		"novel_name":     novelName,
 		"volume_name":    volName,
 		"chapter_number": chapterNum,
@@ -980,6 +1003,19 @@ type sessionRaw struct {
 	ChapterNumber int    `json:"chapter_number"`
 }
 
+// publishRetryError 表示 PublishDraft 失败但草稿已保存，可只重试发布步骤
+type publishRetryError struct {
+	sessionID    string
+	draftItemID  string
+	chapterTitle string
+	volume       string
+	err          error
+}
+
+func (e *publishRetryError) Error() string {
+	return e.err.Error()
+}
+
 func (m *AutoPublishManager) updateTaskChapterNumber(job *AutoPublishJob, chapterTitle string, chapterNumber int) {
 	url := fmt.Sprintf("%s/api/task/%s/update", m.sessionMgrURL, job.TaskID)
 
@@ -1003,7 +1039,50 @@ func (m *AutoPublishManager) updatePublishedCount(job *AutoPublishJob) {
 	body := map[string]interface{}{
 		"chapter_count_delta": 1,
 	}
-	m.doPost(url, body)
+	respBody, err := m.doPost(url, body)
+	if err != nil {
+		log.Printf("[auto_publish] task=%s 更新已发布章数失败: %v", job.TaskID, err)
+		return
+	}
+	log.Printf("[auto_publish] task=%s 已发布章数已递增: %s", job.TaskID, string(respBody))
+}
+
+func (m *AutoPublishManager) saveSessionPostID(taskID, sessionID, postID string) {
+	url := fmt.Sprintf("%s/api/task/%s/update", m.sessionMgrURL, taskID)
+	body := map[string]interface{}{
+		"session_id": sessionID,
+		"post_id":    postID,
+	}
+	respBody, err := m.doPost(url, body)
+	if err != nil {
+		log.Printf("[auto_publish] task=%s 保存PostID失败 session=%s err=%v", taskID, sessionID, err)
+		return
+	}
+	log.Printf("[auto_publish] task=%s 保存PostID成功 session=%s resp=%s", taskID, sessionID, string(respBody))
+}
+
+func (m *AutoPublishManager) retryPublishOnly(job *AutoPublishJob, sessionID, draftItemID, chapterTitle, volume string) error {
+	cred, err := m.getFanqieCredential(job)
+	if err != nil {
+		return fmt.Errorf("credential: %w", err)
+	}
+
+	log.Printf("[auto_publish] task=%s 重试发布: draftItemID=%s chapter=%s volume=%s", job.TaskID, draftItemID, chapterTitle, volume)
+
+	pubResult := m.fanqieAdapter.PublishDraft(job.ctx(), chapterTitle, job.NovelName, volume, cred, job.WorkID, draftItemID)
+	if pubResult.Status != "ok" {
+		return fmt.Errorf("publish draft retry: %s (code=%s)", pubResult.ErrorMessage, pubResult.ErrorCode)
+	}
+
+	log.Printf("[auto_publish] task=%s 重试发布成功: title=%s postId=%s", job.TaskID, chapterTitle, pubResult.PostID)
+
+	if pubResult.PostID != "" && pubResult.PostID != job.WorkID {
+		m.updatePublishedCount(job)
+		m.saveSessionPostID(job.TaskID, sessionID, pubResult.PostID)
+	} else {
+		log.Printf("[auto_publish] task=%s 重试发布 postId 无效(workId=%s)，跳过发布计数", job.TaskID, job.WorkID)
+	}
+	return nil
 }
 
 func (m *AutoPublishManager) executeFinish(taskID, userID string, taskInfo *taskInfoData) {
