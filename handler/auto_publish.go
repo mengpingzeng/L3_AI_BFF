@@ -737,7 +737,7 @@ func (m *AutoPublishManager) generateChapter(job *AutoPublishJob, isFinale bool)
 
 		if isNewBook {
 		log.Printf("[auto_publish] task=%s 检测到新书, 开始设置书籍信息", taskID)
-		name, description, category, fetchErr := m.fetchSkillMeta(job.SkillID)
+		name, description, category, roles, fetchErr := m.fetchSkillMeta(job.SkillID)
 		if fetchErr != nil {
 			log.Printf("[auto_publish] task=%s 获取skill元信息失败: %v", taskID, fetchErr)
 		} else {
@@ -753,7 +753,7 @@ func (m *AutoPublishManager) generateChapter(job *AutoPublishJob, isFinale bool)
 			if downloadErr != nil {
 				log.Printf("[auto_publish] task=%s 下载渲染封面失败: %v", taskID, downloadErr)
 			} else {
-				result := m.fanqieAdapter.SetBookInfo(job.ctx(), cred, platformInfo.WorkID, name, description, category, coverBytes)
+				result := m.fanqieAdapter.SetBookInfo(job.ctx(), cred, platformInfo.WorkID, name, description, category, roles, coverBytes)
 				if result.Status != "ok" {
 					log.Printf("[auto_publish] task=%s 设置书籍信息失败: %s (code=%s)", taskID, result.ErrorMessage, result.ErrorCode)
 				} else {
@@ -1329,22 +1329,23 @@ func (m *AutoPublishManager) doGet(url string) ([]byte, error) {
 	return respBody, nil
 }
 
-func (m *AutoPublishManager) fetchSkillMeta(skillID string) (name, description, category string, err error) {
+func (m *AutoPublishManager) fetchSkillMeta(skillID string) (name, description, category, roles string, err error) {
 	url := fmt.Sprintf("%s/api/skill/%s", m.skillRegistryURL, skillID)
 	respBody, err := m.doGet(url)
 	if err != nil {
-		return "", "", "", fmt.Errorf("fetch skill meta: %w", err)
+		return "", "", "", "", fmt.Errorf("fetch skill meta: %w", err)
 	}
 	var meta struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
 		Category    string `json:"category"`
+		Roles       string `json:"roles"`
 	}
 	if err := json.Unmarshal(respBody, &meta); err != nil {
-		return "", "", "", fmt.Errorf("parse skill meta: %w", err)
+		return "", "", "", "", fmt.Errorf("parse skill meta: %w", err)
 	}
-	log.Printf("[auto_publish] fetchSkillMeta: skill=%s name=%s category=%s", skillID, meta.Name, meta.Category)
-	return meta.Name, meta.Description, meta.Category, nil
+	log.Printf("[auto_publish] fetchSkillMeta: skill=%s name=%s category=%s roles=%s", skillID, meta.Name, meta.Category, meta.Roles)
+	return meta.Name, meta.Description, meta.Category, meta.Roles, nil
 }
 
 func (m *AutoPublishManager) downloadRenderedCover(skillID, author, name string) ([]byte, error) {
