@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"net/url"
 	"os"
 	"strings"
@@ -57,7 +58,8 @@ type AutoPublishJob struct {
 	DraftVersion  int
 	Status        string
 	WorkID        string
-	stopCh        chan struct{}
+	stopCtx       context.Context
+	stopCancel    context.CancelFunc
 	finishCh      chan struct{}
 	mu            sync.Mutex
 	createdAt     time.Time
@@ -200,6 +202,7 @@ func (m *AutoPublishManager) StartAutoPublishInternal(uid, role string, req mode
 		chapterNumber = taskInfo.SessionCount
 	}
 
+	stopCtx, stopCancel := context.WithCancel(context.Background())
 	job := &AutoPublishJob{
 		TaskID:        req.TaskID,
 		UserID:        uid,
@@ -212,7 +215,8 @@ func (m *AutoPublishManager) StartAutoPublishInternal(uid, role string, req mode
 		ChapterNumber: chapterNumber,
 		DraftVersion:  taskInfo.SessionCount,
 		Status:        "running",
-		stopCh:        make(chan struct{}),
+		stopCtx:       stopCtx,
+		stopCancel:    stopCancel,
 		finishCh:      make(chan struct{}, 1),
 		createdAt:     time.Now(),
 	}
@@ -377,10 +381,7 @@ func (m *AutoPublishManager) StopAutoPublish() gin.HandlerFunc {
 
 		m.RecordStoppedTask(req.TaskID)
 
-		select {
-		case job.stopCh <- struct{}{}:
-		default:
-		}
+		job.stopCancel()
 
 		if logger != nil {
 			logger.Info("自动发布已停止: task=%s", req.TaskID)
@@ -502,7 +503,7 @@ func (m *AutoPublishManager) FinishAutoPublish() gin.HandlerFunc {
 func (m *AutoPublishManager) autoPublishLoop(job *AutoPublishJob) {
 	for {
 		select {
-		case <-job.stopCh:
+		case <-job.stopCtx.Done():
 			m.updateJobStatus(job.TaskID, "stopped")
 			log.Printf("[auto_publish] task=%s 收到停止信号,退出循环", job.TaskID)
 			return
@@ -520,7 +521,7 @@ func (m *AutoPublishManager) autoPublishLoop(job *AutoPublishJob) {
 			log.Printf("[auto_publish] task=%s 章节生成/发布失败: %v, 1分钟后重试", job.TaskID, err)
 
 			select {
-			case <-job.stopCh:
+			case <-job.stopCtx.Done():
 				m.updateJobStatus(job.TaskID, "stopped")
 				return
 			case <-job.finishCh:
@@ -552,7 +553,7 @@ func (m *AutoPublishManager) autoPublishLoop(job *AutoPublishJob) {
 		}
 
 		select {
-		case <-job.stopCh:
+		case <-job.stopCtx.Done():
 			m.updateJobStatus(job.TaskID, "stopped")
 			log.Printf("[auto_publish] task=%s 收到停止信号,退出循环", job.TaskID)
 			return
@@ -692,6 +693,11 @@ func (m *AutoPublishManager) generateChapter(job *AutoPublishJob, isFinale bool)
 
 	log.Printf("[auto_publish] task=%s AI 生成完成: title=%s contentLen=%d", taskID, chapterTitle, len(draft))
 
+	if chapterTitle == "" {
+		chapterTitle = fallbackChapterTitle(draft)
+		log.Printf("[auto_publish] task=%s 标题为空，从正文生成兜底标题: %s", taskID, chapterTitle)
+	}
+
 	// ④ 推到草稿箱
 	log.Printf("[auto_publish] task=%s 存草稿到平台草稿箱 title=%s chapter=%d", taskID, chapterTitle, nextChapter)
 
@@ -735,16 +741,19 @@ func (m *AutoPublishManager) generateChapter(job *AutoPublishJob, isFinale bool)
 		if fetchErr != nil {
 			log.Printf("[auto_publish] task=%s 获取skill元信息失败: %v", taskID, fetchErr)
 		} else {
+			if platformInfo.BookName != "" {
+				name = platformInfo.BookName
+			}
 			author, authorErr := m.fanqieAdapter.ResolveAuthorName(job.ctx(), cred)
 			if authorErr != nil {
 				log.Printf("[auto_publish] task=%s 获取账号笔名失败: %v, 使用novelName作为fallback", taskID, authorErr)
 				author = novelName
 			}
-			coverBytes, downloadErr := m.downloadRenderedCover(job.SkillID, author)
+			coverBytes, downloadErr := m.downloadRenderedCover(job.SkillID, author, name)
 			if downloadErr != nil {
 				log.Printf("[auto_publish] task=%s 下载渲染封面失败: %v", taskID, downloadErr)
 			} else {
-				result := m.fanqieAdapter.SetBookInfo(job.ctx(), cred, name, description, category, coverBytes)
+				result := m.fanqieAdapter.SetBookInfo(job.ctx(), cred, platformInfo.WorkID, name, description, category, coverBytes)
 				if result.Status != "ok" {
 					log.Printf("[auto_publish] task=%s 设置书籍信息失败: %s (code=%s)", taskID, result.ErrorMessage, result.ErrorCode)
 				} else {
@@ -779,17 +788,8 @@ func (m *AutoPublishManager) generateChapter(job *AutoPublishJob, isFinale bool)
 	return nil
 }
 
-// ctx 从 job.stopCh 创建 context，用于 fanqieAdapter 的超时/取消控制。
 func (job *AutoPublishJob) ctx() context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		select {
-		case <-job.stopCh:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-	return ctx
+	return job.stopCtx
 }
 
 // getFanqieCredential 从 A1 密钥库获取 fanqie 平台的 cookie。
@@ -938,7 +938,7 @@ func (m *AutoPublishManager) waitForSession(job *AutoPublishJob, sessionID strin
 
 	for {
 		select {
-		case <-job.stopCh:
+		case <-job.stopCtx.Done():
 			return "", "", 0, fmt.Errorf("auto-publish stopped while waiting for session %s", sessionID)
 		case <-ticker.C:
 			if time.Now().After(deadline) {
@@ -1075,6 +1075,28 @@ func (e *saveDraftRetryError) Error() string {
 	return e.err.Error()
 }
 
+var fallbackTitlePunctRe = regexp.MustCompile(`[，,。、；;：:！!？?…""''""【】（）()《》—\-~～\s]+`)
+
+func fallbackChapterTitle(draft string) string {
+	lines := strings.SplitN(draft, "\n", 30)
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		cleaned := fallbackTitlePunctRe.ReplaceAllString(trimmed, "")
+		runes := []rune(cleaned)
+		if len(runes) == 0 {
+			continue
+		}
+		if len(runes) > 8 {
+			return string(runes[:8])
+		}
+		return string(runes)
+	}
+	return ""
+}
+
 func (m *AutoPublishManager) updateTaskChapterNumber(job *AutoPublishJob, chapterTitle string, chapterNumber int) {
 	url := fmt.Sprintf("%s/api/task/%s/update", m.sessionMgrURL, job.TaskID)
 
@@ -1192,6 +1214,7 @@ func (m *AutoPublishManager) executeFinish(taskID, userID string, taskInfo *task
 		skillID = "general_fallback_v1"
 	}
 
+	stopCtx, stopCancel := context.WithCancel(context.Background())
 	job := &AutoPublishJob{
 		TaskID:        taskID,
 		UserID:        userID,
@@ -1204,7 +1227,8 @@ func (m *AutoPublishManager) executeFinish(taskID, userID string, taskInfo *task
 		ChapterNumber: taskInfo.ChapterNumber,
 		DraftVersion:  taskInfo.SessionCount,
 		Status:        "finishing",
-		stopCh:        make(chan struct{}),
+		stopCtx:       stopCtx,
+		stopCancel:    stopCancel,
 		finishCh:      make(chan struct{}, 1),
 		createdAt:     time.Now(),
 	}
@@ -1323,9 +1347,9 @@ func (m *AutoPublishManager) fetchSkillMeta(skillID string) (name, description, 
 	return meta.Name, meta.Description, meta.Category, nil
 }
 
-func (m *AutoPublishManager) downloadRenderedCover(skillID, author string) ([]byte, error) {
-	queryURL := fmt.Sprintf("%s/api/skill/%s/cover-rendered?author=%s",
-		m.skillRegistryURL, skillID, url.QueryEscape(author))
+func (m *AutoPublishManager) downloadRenderedCover(skillID, author, name string) ([]byte, error) {
+	queryURL := fmt.Sprintf("%s/api/skill/%s/cover-rendered?author=%s&name=%s",
+		m.skillRegistryURL, skillID, url.QueryEscape(author), url.QueryEscape(name))
 	respBody, err := m.doGet(queryURL)
 	if err != nil {
 		return nil, fmt.Errorf("download rendered cover: %w", err)
