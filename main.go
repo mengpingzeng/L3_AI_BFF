@@ -28,7 +28,7 @@ func main() {
 		Timeout:    600 * time.Second,
 	})
 
-	autoPubMgr := handler.NewAutoPublishManager(cfg.SessionMgrURL, cfg.WorkflowURL, cfg.A1AccountURL, cfg.StoppedTasksFile, fanqieAdapter, cfg.A1BaseURL)
+	autoPubMgr := handler.NewAutoPublishManager(cfg.SessionMgrURL, cfg.WorkflowURL, cfg.A1AccountURL, cfg.SkillRegistryURL, cfg.StoppedTasksFile, fanqieAdapter, cfg.A1BaseURL)
 	r := router.Setup(cfg, autoPubMgr)
 
 	srv := &http.Server{

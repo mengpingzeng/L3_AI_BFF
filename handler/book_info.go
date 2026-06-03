@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/claw-studio/L3_AI_BFF/middleware"
@@ -132,6 +133,7 @@ type bookChapterRaw struct {
 	Status        string `json:"status"`
 	DraftVersion  int    `json:"draft_version"`
 	DraftSize     int64  `json:"draft_size,omitempty"`
+	ChapterTitle  string `json:"chapter_title,omitempty"`
 	PostID        string `json:"post_id,omitempty"`
 	VolumeName    string `json:"volume_name"`
 	ChapterNumber int    `json:"chapter_number"`
@@ -170,6 +172,7 @@ func buildVolumeTree(sessions []bookChapterRaw) []bookVolume {
 		chapters = append(chapters, bookChapter{
 			ChapterNumber: s.ChapterNumber,
 			SessionID:     s.SessionID,
+			Title:         strings.TrimSpace(s.ChapterTitle),
 			Status:        s.Status,
 			DraftVersion:  s.DraftVersion,
 			Phase:         phase,
