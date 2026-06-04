@@ -698,6 +698,12 @@ func (m *AutoPublishManager) generateChapter(job *AutoPublishJob, isFinale bool)
 		log.Printf("[auto_publish] task=%s 标题为空，从正文生成兜底标题: %s", taskID, chapterTitle)
 	}
 
+	// ③.5 新书：立即设置书籍信息（不依赖 save_draft 成功，避免 save_draft 失败导致错过触发窗口）
+	if isNewBook {
+		log.Printf("[auto_publish] task=%s 检测到新书, 开始设置书籍信息", taskID)
+		m.setNewBookInfo(job, cred, platformInfo, novelName)
+	}
+
 	// ④ 推到草稿箱
 	log.Printf("[auto_publish] task=%s 存草稿到平台草稿箱 title=%s chapter=%d", taskID, chapterTitle, nextChapter)
 
@@ -722,42 +728,18 @@ func (m *AutoPublishManager) generateChapter(job *AutoPublishJob, isFinale bool)
 	// ⑤ 从草稿箱推发布
 	log.Printf("[auto_publish] task=%s 从草稿箱推发布 title=%s chapter=%d", taskID, chapterTitle, nextChapter)
 
-	platformInfo2, pubErr2 := m.fanqieAdapter.GetPlatformInfo(job.ctx(), novelName, cred, job.WorkID)
-	var draftItemID string
-	if pubErr2 != nil {
-		log.Printf("[auto_publish] task=%s 获取平台状态失败(发布前): %s", taskID, pubErr2.ErrorMessage)
-	} else {
-		for _, d := range platformInfo2.Drafts {
+	// 优先使用 save_draft 返回的 draftItemId（从页面 URL 精确提取），
+	// 失败时回退到 get_platform_info → draft_list API 匹配
+	draftItemID := saveResult.DraftItemID
+	if draftItemID == "" {
+		platformInfo2, pubErr2 := m.fanqieAdapter.GetPlatformInfo(job.ctx(), novelName, cred, job.WorkID)
+		if pubErr2 != nil {
+			log.Printf("[auto_publish] task=%s 获取平台状态失败(发布前): %s", taskID, pubErr2.ErrorMessage)
+		} else {
+			for _, d := range platformInfo2.Drafts {
 				if d.ChapterNumber == nextChapter {
 					draftItemID = d.ItemID
 					break
-				}
-			}
-	}
-
-		if isNewBook {
-		log.Printf("[auto_publish] task=%s 检测到新书, 开始设置书籍信息", taskID)
-		name, description, category, roles, fetchErr := m.fetchSkillMeta(job.SkillID)
-		if fetchErr != nil {
-			log.Printf("[auto_publish] task=%s 获取skill元信息失败: %v", taskID, fetchErr)
-		} else {
-			if platformInfo.BookName != "" {
-				name = platformInfo.BookName
-			}
-			author, authorErr := m.fanqieAdapter.ResolveAuthorName(job.ctx(), cred)
-			if authorErr != nil {
-				log.Printf("[auto_publish] task=%s 获取账号笔名失败: %v, 使用novelName作为fallback", taskID, authorErr)
-				author = novelName
-			}
-			coverBytes, downloadErr := m.downloadRenderedCover(job.SkillID, author, name)
-			if downloadErr != nil {
-				log.Printf("[auto_publish] task=%s 下载渲染封面失败: %v", taskID, downloadErr)
-			} else {
-				result := m.fanqieAdapter.SetBookInfo(job.ctx(), cred, platformInfo.WorkID, name, description, category, roles, coverBytes)
-				if result.Status != "ok" {
-					log.Printf("[auto_publish] task=%s 设置书籍信息失败: %s (code=%s)", taskID, result.ErrorMessage, result.ErrorCode)
-				} else {
-					log.Printf("[auto_publish] task=%s 书籍信息设置成功: name=%s", taskID, name)
 				}
 			}
 		}
@@ -1002,6 +984,35 @@ func (m *AutoPublishManager) getDraft(sessionID string) (string, string, error) 
 	}
 
 	return resp.Draft, resp.ChapterTitle, nil
+}
+
+// setNewBookInfo 从 skill 元数据中提取书籍信息并调用 SetBookInfo 上传封面和设置分类/简介。
+// 在新书首次 get_platform_info 返回 newlyCreated=true 时立即调用，不依赖 save_draft 结果。
+func (m *AutoPublishManager) setNewBookInfo(job *AutoPublishJob, cred string, platformInfo *c1.PlatformInfo, novelName string) {
+	name, description, category, roles, fetchErr := m.fetchSkillMeta(job.SkillID)
+	if fetchErr != nil {
+		log.Printf("[auto_publish] task=%s 获取skill元信息失败: %v", job.TaskID, fetchErr)
+		return
+	}
+	if platformInfo.BookName != "" {
+		name = platformInfo.BookName
+	}
+	author, authorErr := m.fanqieAdapter.ResolveAuthorName(job.ctx(), cred)
+	if authorErr != nil {
+		log.Printf("[auto_publish] task=%s 获取账号笔名失败: %v, 使用novelName作为fallback", job.TaskID, authorErr)
+		author = novelName
+	}
+	coverBytes, downloadErr := m.downloadRenderedCover(job.SkillID, author, name)
+	if downloadErr != nil {
+		log.Printf("[auto_publish] task=%s 下载渲染封面失败: %v", job.TaskID, downloadErr)
+		return
+	}
+	result := m.fanqieAdapter.SetBookInfo(job.ctx(), cred, platformInfo.WorkID, name, description, category, roles, coverBytes)
+	if result.Status != "ok" {
+		log.Printf("[auto_publish] task=%s 设置书籍信息失败: %s (code=%s)", job.TaskID, result.ErrorMessage, result.ErrorCode)
+	} else {
+		log.Printf("[auto_publish] task=%s 书籍信息设置成功: name=%s", job.TaskID, name)
+	}
 }
 
 func (m *AutoPublishManager) closeSessionQuiet(sessionID string) {
