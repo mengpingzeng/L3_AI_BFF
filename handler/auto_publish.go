@@ -632,6 +632,17 @@ func (m *AutoPublishManager) generateChapter(job *AutoPublishJob, isFinale bool)
 	log.Printf("[auto_publish] task=%s 计算下一章: volume=%s chapter=%d (lastPublished=%d currentChapter=%d)",
 		taskID, nextVolume, nextChapter, lastPublished.ChapterNumber, currentChapter)
 
+	var volumeId string
+	apiVolumeName := nextVolume
+	for _, v := range platformInfo.Volumes {
+		if strings.Contains(v.VolumeName, nextVolume) {
+			volumeId = v.VolumeID
+			apiVolumeName = v.VolumeName
+			break
+		}
+	}
+	log.Printf("[auto_publish] task=%s 分卷映射: nextVolume=%s apiVolumeName=%s volumeId=%s", taskID, nextVolume, apiVolumeName, volumeId)
+
 	if m.isAlreadyPublished(lastPublished, nextChapter) {
 		log.Printf("[auto_publish] task=%s 章节 %d 已在已发布列表中，跳过生成，直接推进号", taskID, nextChapter)
 		job.mu.Lock()
@@ -698,6 +709,8 @@ func (m *AutoPublishManager) generateChapter(job *AutoPublishJob, isFinale bool)
 		log.Printf("[auto_publish] task=%s 标题为空，从正文生成兜底标题: %s", taskID, chapterTitle)
 	}
 
+	fullTitle := fmt.Sprintf("第%d章 %s", nextChapter, chapterTitle)
+
 	// ③.5 新书：立即设置书籍信息（不依赖 save_draft 成功，避免 save_draft 失败导致错过触发窗口）
 	if isNewBook {
 		log.Printf("[auto_publish] task=%s 检测到新书, 开始设置书籍信息", taskID)
@@ -725,8 +738,8 @@ func (m *AutoPublishManager) generateChapter(job *AutoPublishJob, isFinale bool)
 
 	m.updateTaskChapterNumber(job, chapterTitle, nextChapter)
 
-	// ⑤ 从草稿箱推发布
-	log.Printf("[auto_publish] task=%s 从草稿箱推发布 title=%s chapter=%d", taskID, chapterTitle, nextChapter)
+	// ⑤ 从草稿箱推发布（优先 API，Puppeteer 兜底）
+	log.Printf("[auto_publish] task=%s 从草稿箱推发布 title=%s fullTitle=%s chapter=%d", taskID, chapterTitle, fullTitle, nextChapter)
 
 	// 优先使用 save_draft 返回的 draftItemId（从页面 URL 精确提取），
 	// 失败时回退到 get_platform_info → draft_list API 匹配
@@ -745,19 +758,28 @@ func (m *AutoPublishManager) generateChapter(job *AutoPublishJob, isFinale bool)
 		}
 	}
 
-	pubResult := m.fanqieAdapter.PublishDraft(job.ctx(), chapterTitle, novelName, nextVolume, cred, job.WorkID, draftItemID)
-	if pubResult.Status != "ok" {
-		log.Printf("[auto_publish] task=%s 发布草稿失败: %s (code=%s)", taskID, pubResult.ErrorMessage, pubResult.ErrorCode)
-		return &publishRetryError{
-			sessionID:    sessionID,
-			draftItemID:  draftItemID,
-			chapterTitle: chapterTitle,
-			volume:       nextVolume,
-			err:          fmt.Errorf("publish draft: %s (code=%s)", pubResult.ErrorMessage, pubResult.ErrorCode),
+	// 优先：通过浏览器内 API 直接发布
+	var pubResult *c1.PublishResult
+	pubResult = m.fanqieAdapter.PublishDraftViaPageAPI(job.ctx(), job.WorkID, draftItemID, fullTitle, draft, apiVolumeName, volumeId, cred)
+	if pubResult.Status == "ok" {
+		log.Printf("[auto_publish] task=%s API发布草稿成功: title=%s postId=%s", taskID, fullTitle, pubResult.PostID)
+	} else {
+		log.Printf("[auto_publish] task=%s API发布草稿失败: %s (code=%s), 回退Puppeteer", taskID, pubResult.ErrorMessage, pubResult.ErrorCode)
+		pubResult = m.fanqieAdapter.PublishDraft(job.ctx(), chapterTitle, novelName, nextVolume, cred, job.WorkID, draftItemID)
+		if pubResult.Status != "ok" {
+			log.Printf("[auto_publish] task=%s Puppeteer发布草稿也失败: %s (code=%s)", taskID, pubResult.ErrorMessage, pubResult.ErrorCode)
+			return &publishRetryError{
+				sessionID:    sessionID,
+				draftItemID:  draftItemID,
+				chapterTitle: chapterTitle,
+				volume:       nextVolume,
+				err:          fmt.Errorf("publish draft: %s (code=%s)", pubResult.ErrorMessage, pubResult.ErrorCode),
+			}
 		}
+		log.Printf("[auto_publish] task=%s Puppeteer兜底发布成功: title=%s postId=%s", taskID, chapterTitle, pubResult.PostID)
 	}
 
-	log.Printf("[auto_publish] task=%s 发布草稿成功: title=%s postId=%s", taskID, chapterTitle, pubResult.PostID)
+	log.Printf("[auto_publish] task=%s 发布草稿成功: title=%s postId=%s", taskID, fullTitle, pubResult.PostID)
 
 	if pubResult.PostID != "" && pubResult.PostID != job.WorkID {
 		m.updatePublishedCount(job)
