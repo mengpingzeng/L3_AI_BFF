@@ -717,22 +717,30 @@ func (m *AutoPublishManager) generateChapter(job *AutoPublishJob, isFinale bool)
 		m.setNewBookInfo(job, cred, platformInfo, novelName)
 	}
 
-	// ④ 推到草稿箱
-	log.Printf("[auto_publish] task=%s 存草稿到平台草稿箱 title=%s chapter=%d", taskID, chapterTitle, nextChapter)
+	// ④ 推到草稿箱（API 优先，Puppeteer 兜底）
+	log.Printf("[auto_publish] task=%s 存草稿到平台草稿箱 title=%s chapter=%d", taskID, fullTitle, nextChapter)
 
-	saveResult := m.fanqieAdapter.SaveDraft(job.ctx(), chapterTitle, draft, novelName, nextChapter, cred, job.WorkID)
+	saveResult := m.fanqieAdapter.SaveDraftViaPageAPI(job.ctx(), fullTitle, draft, novelName, nextChapter, cred, job.WorkID, apiVolumeName, volumeId)
 	if saveResult.Status != "ok" {
 		if saveResult.ErrorCode == c1.ErrCodeDailyLimit {
 			return fmt.Errorf("save draft: DAILY_LIMIT: %s", saveResult.ErrorMessage)
 		}
-		return &saveDraftRetryError{
-			sessionID:    sessionID,
-			draft:        draft,
-			chapterTitle: chapterTitle,
-			chapterNum:   nextChapter,
-			volume:       nextVolume,
-			err:          fmt.Errorf("save draft: %s (code=%s)", saveResult.ErrorMessage, saveResult.ErrorCode),
+		log.Printf("[auto_publish] task=%s API存草稿失败: %s (code=%s), 回退Puppeteer", taskID, saveResult.ErrorMessage, saveResult.ErrorCode)
+		saveResult = m.fanqieAdapter.SaveDraft(job.ctx(), chapterTitle, draft, novelName, nextChapter, cred, job.WorkID)
+		if saveResult.Status != "ok" {
+			if saveResult.ErrorCode == c1.ErrCodeDailyLimit {
+				return fmt.Errorf("save draft: DAILY_LIMIT: %s", saveResult.ErrorMessage)
+			}
+			return &saveDraftRetryError{
+				sessionID:    sessionID,
+				draft:        draft,
+				chapterTitle: chapterTitle,
+				chapterNum:   nextChapter,
+				volume:       nextVolume,
+				err:          fmt.Errorf("save draft: %s (code=%s)", saveResult.ErrorMessage, saveResult.ErrorCode),
+			}
 		}
+		log.Printf("[auto_publish] task=%s Puppeteer兜底存草稿成功: title=%s", taskID, chapterTitle)
 	}
 	log.Printf("[auto_publish] task=%s 存草稿成功: title=%s", taskID, chapterTitle)
 
@@ -1208,21 +1216,46 @@ func (m *AutoPublishManager) retrySaveAndPublish(job *AutoPublishJob, sessionID,
 	novelName := job.NovelName
 	log.Printf("[auto_publish] task=%s 重试存草稿+发布: chapter=%d title=%s volume=%s", job.TaskID, chapterNum, chapterTitle, volume)
 
-	saveResult := m.fanqieAdapter.SaveDraft(job.ctx(), chapterTitle, draft, novelName, chapterNum, cred, job.WorkID)
+	fullTitle := fmt.Sprintf("第%d章 %s", chapterNum, chapterTitle)
+
+	// 先获取平台信息用于 volumeId 解析和后续 draftItemID 查询
+	platformInfo, pubErr := m.fanqieAdapter.GetPlatformInfo(job.ctx(), novelName, cred, job.WorkID)
+	var volumeId, apiVolumeName string
+	apiVolumeName = volume
+	if pubErr == nil {
+		for _, v := range platformInfo.Volumes {
+			if strings.Contains(v.VolumeName, volume) {
+				volumeId = v.VolumeID
+				apiVolumeName = v.VolumeName
+				break
+			}
+		}
+	}
+
+	// API 优先存草稿
+	saveResult := m.fanqieAdapter.SaveDraftViaPageAPI(job.ctx(), fullTitle, draft, novelName, chapterNum, cred, job.WorkID, apiVolumeName, volumeId)
 	if saveResult.Status != "ok" {
-		return fmt.Errorf("save draft retry: %s (code=%s)", saveResult.ErrorMessage, saveResult.ErrorCode)
+		log.Printf("[auto_publish] task=%s 重试API存草稿失败: %s, 回退Puppeteer", job.TaskID, saveResult.ErrorMessage)
+		saveResult = m.fanqieAdapter.SaveDraft(job.ctx(), chapterTitle, draft, novelName, chapterNum, cred, job.WorkID)
+		if saveResult.Status != "ok" {
+			return fmt.Errorf("save draft retry: %s (code=%s)", saveResult.ErrorMessage, saveResult.ErrorCode)
+		}
 	}
 	log.Printf("[auto_publish] task=%s 重试存草稿成功: title=%s", job.TaskID, chapterTitle)
 
 	m.updateTaskChapterNumber(job, chapterTitle, chapterNum)
 
-	platformInfo, pubErr := m.fanqieAdapter.GetPlatformInfo(job.ctx(), novelName, cred, job.WorkID)
-	var draftItemID string
-	if pubErr == nil {
-		for _, d := range platformInfo.Drafts {
-			if d.ChapterNumber == chapterNum {
-				draftItemID = d.ItemID
-				break
+	// 获取 draftItemID：优先从 saveResult，兜底从平台信息
+	draftItemID := saveResult.DraftItemID
+	if draftItemID == "" {
+		// save 前的 platformInfo 可能没有新草稿，重新获取
+		platformInfo2, pubErr2 := m.fanqieAdapter.GetPlatformInfo(job.ctx(), novelName, cred, job.WorkID)
+		if pubErr2 == nil {
+			for _, d := range platformInfo2.Drafts {
+				if d.ChapterNumber == chapterNum {
+					draftItemID = d.ItemID
+					break
+				}
 			}
 		}
 	}
