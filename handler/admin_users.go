@@ -20,6 +20,7 @@ type adminUserListPayload struct {
 type adminUserRow struct {
 	UID          string `json:"uid"`
 	Username     string `json:"username"`
+	Phone        string `json:"phone,omitempty"`
 	Role         string `json:"role"`
 	AccountCount int    `json:"accountCount"`
 	TaskCount    int    `json:"taskCount"`

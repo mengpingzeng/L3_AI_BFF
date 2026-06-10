@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -184,12 +185,27 @@ func AuthLoginProxy(accountURL string) gin.HandlerFunc {
 	}
 }
 
-func GetCurrentUser() gin.HandlerFunc {
+func GetCurrentUser(accountURL string) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		tid, _ := c.Get(model.TraceIDKey)
+
+		respBody, statusCode, err := proxy.ForwardGet(c, strings.TrimSuffix(accountURL, "/")+"/api/auth/me")
+		if err == nil && statusCode >= 200 && statusCode < 300 {
+			var profile map[string]interface{}
+			if json.Unmarshal(respBody, &profile) == nil && profile["uid"] != nil {
+				c.JSON(http.StatusOK, model.APIResponse{
+					Code:    0,
+					Message: "ok",
+					Data:    profile,
+					TraceID: tid.(string),
+				})
+				return
+			}
+		}
+
 		uid, _ := c.Get("uid")
 		role, _ := c.Get("role")
 		username, _ := c.Get("username")
-		tid, _ := c.Get(model.TraceIDKey)
 		c.JSON(http.StatusOK, model.APIResponse{
 			Code:    0,
 			Message: "ok",

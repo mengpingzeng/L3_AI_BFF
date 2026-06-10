@@ -70,9 +70,21 @@ type AutoPublishStopReq struct {
 	UserID string `json:"user_id"`
 }
 
+type AutoPublishQueueStatusReq struct {
+	TaskID string `form:"task_id"`
+}
+
 type AutoPublishFinishReq struct {
 	TaskID string `json:"task_id"`
 	UserID string `json:"user_id"`
+}
+
+type AutoPublishRestartReq struct {
+	TaskID string `json:"task_id"`
+}
+
+type AutoPublishDeleteReq struct {
+	TaskID string `json:"task_id"`
 }
 
 type AllocSkillReq struct {

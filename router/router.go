@@ -11,7 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func Setup(cfg *config.Config, autoPubMgr *handler.AutoPublishManager) *gin.Engine {
+func Setup(cfg *config.Config, autoPubMgr *handler.AutoPublishManager, taskMgr *handler.TaskManager) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 
@@ -35,8 +35,8 @@ func Setup(cfg *config.Config, autoPubMgr *handler.AutoPublishManager) *gin.Engi
 	{
 		taskGroup := api.Group("/task")
 		{
-			taskGroup.POST("/create", handler.CreateTask(cfg.SessionMgrURL, autoPubMgr))
-			taskGroup.GET("/list", handler.ListTask(formatURL(cfg.SessionMgrURL, "/api/task/list"), autoPubMgr, cfg.C2DashboardURL))
+			taskGroup.POST("/create", handler.CreateTask(cfg.SessionMgrURL, autoPubMgr, taskMgr))
+			taskGroup.GET("/list", handler.ListTask(formatURL(cfg.SessionMgrURL, "/api/task/list"), autoPubMgr, cfg.C2DashboardURL, taskMgr))
 			taskGroup.POST("/alloc_skill", handler.AllocSkill(cfg.SkillRegistryURL, cfg.SessionMgrURL))
 			taskGroup.POST("/alloc_skill/release", handler.ReleaseSkill(cfg.SkillRegistryURL))
 			taskGroup.GET("/alloc_skill/available", handler.AvailableSkillCount(cfg.SkillRegistryURL))
@@ -55,6 +55,19 @@ func Setup(cfg *config.Config, autoPubMgr *handler.AutoPublishManager) *gin.Engi
 			taskGroup.DELETE("/:tid/messages", handler.ClearTaskMessages(cfg.SessionMgrURL))
 			taskGroup.DELETE("/:tid", handler.DeleteTask(cfg.SessionMgrURL))
 			taskGroup.POST("/:tid/publish", handler.PublishTask(formatURL(cfg.WorkflowURL, "/api/task"), cfg.SessionMgrURL, cfg.A1AccountURL))
+		}
+
+		if taskMgr != nil {
+		atmGroup := api.Group("/auto_publish_task")
+		{
+			atmGroup.POST("/stop", taskMgr.StopTaskHandler())
+				atmGroup.POST("/restart", taskMgr.RestartTaskHandler())
+				atmGroup.POST("/delete", taskMgr.DeleteTaskHandler())
+				atmGroup.GET("/status", taskMgr.GetTaskStatusHandler())
+				atmGroup.GET("/queue", taskMgr.GetQueueHandler())
+			}
+
+			api.PUT("/config/auto-publish-slots", taskMgr.SetMaxSlotsHandler())
 		}
 
 		sessionGroup := api.Group("/session")
@@ -87,7 +100,7 @@ func Setup(cfg *config.Config, autoPubMgr *handler.AutoPublishManager) *gin.Engi
 
 		api.POST("/auth/login", handler.AuthLoginProxy(cfg.A1AccountURL))
 
-		api.GET("/auth/me", handler.GetCurrentUser())
+		api.GET("/auth/me", handler.GetCurrentUser(cfg.A1AccountURL))
 	}
 
 	adminGroup := r.Group("/api/admin")

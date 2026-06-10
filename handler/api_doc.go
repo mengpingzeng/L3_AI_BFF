@@ -44,7 +44,7 @@ var endpointRegistry = []EndpointEntry{
 		Summary: "用户登录，返回JWT Token",
 		Module:  "认证",
 		Params: &EndpointParams{
-			Body: `{"username":"用户名","password":"密码(>=8位)"}`,
+			Body: `{"username":"用户名或手机号","password":"密码(>=8位)"}`,
 		},
 		Response: `{"code":0,"data":{"uid":"user_001","username":"admin","token":"eyJ...","role":"admin"}}`,
 		Backend:  &EndpointBackend{Type: "pure_proxy", Calls: []string{"POST a1_vault:/api/auth/login"}},
@@ -516,6 +516,16 @@ var endpointRegistry = []EndpointEntry{
 			Path: map[string]string{"accountId": "账号ID"},
 		},
 		Backend: &EndpointBackend{Type: "pure_proxy", Calls: []string{"GET a1_vault:/api/account/health/{account_id}"}},
+	},
+	{
+		Method:  "POST",
+		Path:    "/api/account/sync-profile/{accountId}",
+		Summary: "同步账号资料（卡片刷新时调用）",
+		Module:  "账号管理",
+		Params: &EndpointParams{
+			Path: map[string]string{"accountId": "账号ID"},
+		},
+		Backend: &EndpointBackend{Type: "pure_proxy", Calls: []string{"POST a1_vault:/api/account/sync-profile/{account_id}"}},
 	},
 	{
 		Method:  "GET",

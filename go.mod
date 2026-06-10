@@ -6,9 +6,12 @@ require (
 	clawstudios/l1_ai_releaser v0.0.0
 	clawstudios/pkg/logging v0.0.0
 	github.com/gin-gonic/gin v1.9.1
+	github.com/go-sql-driver/mysql v1.10.0
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/google/uuid v1.6.0
 )
+
+require filippo.io/edwards25519 v1.2.0 // indirect
 
 replace clawstudios/pkg/logging => /home/claw_studios/code/pkg/logging
 

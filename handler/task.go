@@ -1,13 +1,16 @@
 package handler
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/claw-studio/L3_AI_BFF/model"
 	"github.com/claw-studio/L3_AI_BFF/pkg/idgen"
@@ -16,7 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func CreateTask(sessionMgrURL string, autoPubMgr *AutoPublishManager) gin.HandlerFunc {
+func CreateTask(sessionMgrURL string, autoPubMgr *AutoPublishManager, taskMgr *TaskManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req model.CreateTaskReq
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -79,10 +82,18 @@ func CreateTask(sessionMgrURL string, autoPubMgr *AutoPublishManager) gin.Handle
 				Topic:     req.Topic,
 				NovelName: req.NovelName,
 			}
-			if err := autoPubMgr.StartAutoPublishInternal(uid.(string), role.(string), autoReq); err != nil {
-				log.Printf("[create_task] task=%s 自动发布启动失败: %v", taskID, err)
-			} else {
-				autoPublishStarted = true
+			if taskMgr != nil {
+				if _, err := taskMgr.CreateTask(uid.(string), role.(string), autoReq); err != nil {
+					log.Printf("[create_task] task=%s 入队失败: %v", taskID, err)
+				} else {
+					autoPublishStarted = true
+				}
+			} else if autoPubMgr != nil {
+				if err := autoPubMgr.StartAutoPublishInternal(uid.(string), role.(string), autoReq); err != nil {
+					log.Printf("[create_task] task=%s 自动发布启动失败: %v", taskID, err)
+				} else {
+					autoPublishStarted = true
+				}
 			}
 		}
 
@@ -165,7 +176,7 @@ func GetTask(sessionMgrURL string) gin.HandlerFunc {
 	}
 }
 
-func ListTask(listURL string, autoPubMgr *AutoPublishManager, dashboardURL string) gin.HandlerFunc {
+func ListTask(listURL string, autoPubMgr *AutoPublishManager, dashboardURL string, taskMgr *TaskManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var q model.TaskListQuery
 		if err := c.ShouldBindQuery(&q); err != nil {
@@ -215,10 +226,28 @@ func ListTask(listURL string, autoPubMgr *AutoPublishManager, dashboardURL strin
 			}
 			autoPubMgr.ReloadStoppedTasks()
 			smBase := strings.TrimSuffix(listURL, "/api/task/list")
-			filtered, err := listVisibleTasksPage(smBase, uidFilter, q.Q, q.Page, q.Size, autoPubMgr.IsStopped)
+			visible, err := listVisibleTasks(smBase, uidFilter, q.Q, autoPubMgr.IsStopped)
 			if err == nil {
-				tasksJSON = []byte(filtered)
+				payload, _ := json.Marshal(map[string]interface{}{
+					"tasks": visible,
+					"total": len(visible),
+				})
+				tasksJSON = payload
 				useProxyFallback = false
+			}
+		}
+
+		if !useProxyFallback {
+			enriched := enrichTasksWithPublishStats(tasksJSON, dashboardURL)
+			if taskMgr != nil {
+				enriched = enrichTasksWithAutoPublish(enriched, taskMgr)
+			}
+			enriched = sortTaskListJSON(enriched)
+			paged, pageErr := paginateTaskListJSON(enriched, q.Page, q.Size)
+			if pageErr == nil {
+				c.Header("Content-Type", "application/json")
+				c.String(200, paged)
+				return
 			}
 		}
 
@@ -234,6 +263,10 @@ func ListTask(listURL string, autoPubMgr *AutoPublishManager, dashboardURL strin
 		}
 
 		enriched := enrichTasksWithPublishStats(tasksJSON, dashboardURL)
+		if taskMgr != nil {
+			enriched = enrichTasksWithAutoPublish(enriched, taskMgr)
+		}
+		enriched = sortTaskListJSON(enriched)
 
 		c.Header("Content-Type", "application/json")
 		c.String(200, string(enriched))
@@ -286,6 +319,196 @@ func enrichTasksWithPublishStats(tasksJSON []byte, dashboardURL string) []byte {
 	return result
 }
 
+func enrichTasksWithAutoPublish(tasksJSON []byte, taskMgr *TaskManager) []byte {
+	var resp struct {
+		Tasks []map[string]interface{} `json:"tasks"`
+		Total int                      `json:"total"`
+	}
+	if err := json.Unmarshal(tasksJSON, &resp); err != nil || len(resp.Tasks) == 0 {
+		return tasksJSON
+	}
+
+	taskIDs := make([]string, 0, len(resp.Tasks))
+	taskIndex := make(map[string]int)
+	for i, t := range resp.Tasks {
+		if tid, ok := t["task_id"].(string); ok && tid != "" {
+			taskIDs = append(taskIDs, tid)
+			taskIndex[tid] = i
+		}
+	}
+	if len(taskIDs) == 0 {
+		return tasksJSON
+	}
+
+	query, args, err := sqlxIn(taskIDs)
+	if err != nil {
+		return tasksJSON
+	}
+	rows, err := taskMgr.db.Query(query, args...)
+	if err != nil {
+		return tasksJSON
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var tid, status string
+		var entryTime time.Time
+		var errMsg sql.NullString
+		if scanErr := rows.Scan(&tid, &status, &entryTime, &errMsg); scanErr != nil {
+			continue
+		}
+		if idx, ok := taskIndex[tid]; ok {
+			resp.Tasks[idx]["auto_publish_status"] = status
+			resp.Tasks[idx]["auto_publish_entry_time"] = entryTime.Format(time.RFC3339)
+			if errMsg.Valid {
+				resp.Tasks[idx]["auto_publish_error_message"] = errMsg.String
+			}
+		}
+	}
+
+	qRows, qErr := taskMgr.db.Query(`SELECT task_id FROM auto_publish_task WHERE status='queued' ORDER BY entry_time ASC`)
+	if qErr == nil {
+		defer qRows.Close()
+		pos := 0
+		for qRows.Next() {
+			pos++
+			var qTid string
+			if qRows.Scan(&qTid) == nil {
+				for _, t := range resp.Tasks {
+					tid, _ := t["task_id"].(string)
+					if tid == qTid && t["auto_publish_status"] == "queued" {
+						t["auto_publish_queue_position"] = pos
+						break
+					}
+				}
+			}
+		}
+	}
+
+	filtered := make([]map[string]interface{}, 0, len(resp.Tasks))
+	for _, t := range resp.Tasks {
+		if t["auto_publish_status"] != "deleted" {
+			filtered = append(filtered, t)
+		}
+	}
+	resp.Tasks = filtered
+
+	result, _ := json.Marshal(resp)
+	return result
+}
+
+func sortTaskListJSON(tasksJSON []byte) []byte {
+	var resp struct {
+		Tasks []map[string]interface{} `json:"tasks"`
+		Total int                      `json:"total"`
+	}
+	if err := json.Unmarshal(tasksJSON, &resp); err != nil || len(resp.Tasks) == 0 {
+		return tasksJSON
+	}
+	sortTasksByAutoPublishPriority(resp.Tasks)
+	resp.Total = len(resp.Tasks)
+	result, _ := json.Marshal(resp)
+	return result
+}
+
+func paginateTaskListJSON(tasksJSON []byte, page, size int) (string, error) {
+	var resp struct {
+		Tasks []map[string]interface{} `json:"tasks"`
+		Total int                      `json:"total"`
+	}
+	if err := json.Unmarshal(tasksJSON, &resp); err != nil {
+		return "", err
+	}
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 {
+		size = 12
+	}
+	total := len(resp.Tasks)
+	start := (page - 1) * size
+	if start >= total {
+		resp.Tasks = []map[string]interface{}{}
+	} else {
+		end := start + size
+		if end > total {
+			end = total
+		}
+		resp.Tasks = resp.Tasks[start:end]
+	}
+	resp.Total = total
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func sortTasksByAutoPublishPriority(tasks []map[string]interface{}) {
+	sort.SliceStable(tasks, func(i, j int) bool {
+		ti, qi := taskAutoPublishSortTier(tasks[i])
+		tj, qj := taskAutoPublishSortTier(tasks[j])
+		if ti != tj {
+			return ti < tj
+		}
+		if ti == 1 && qi != qj {
+			return qi < qj
+		}
+		return taskCreatedAtTime(tasks[i]).Before(taskCreatedAtTime(tasks[j]))
+	})
+}
+
+func taskAutoPublishSortTier(t map[string]interface{}) (tier int, queuePos int) {
+	status, _ := t["auto_publish_status"].(string)
+	switch status {
+	case "running":
+		return 0, 0
+	case "queued":
+		return 1, taskQueuePositionFromMap(t)
+	default:
+		return 2, 0
+	}
+}
+
+func taskQueuePositionFromMap(t map[string]interface{}) int {
+	switch v := t["auto_publish_queue_position"].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	default:
+		return 1_000_000
+	}
+}
+
+func taskCreatedAtTime(t map[string]interface{}) time.Time {
+	raw, _ := t["created_at"].(string)
+	if raw == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
+}
+
+func sqlxIn(ids []string) (string, []interface{}, error) {
+	if len(ids) == 0 {
+		return "", nil, fmt.Errorf("empty ids")
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := fmt.Sprintf("SELECT task_id, status, entry_time, error_message FROM auto_publish_task WHERE task_id IN (%s)", strings.Join(placeholders, ","))
+	return query, args, nil
+}
+
 func fetchPublishBatchStats(dashboardURL string, taskIDs []string) map[string]publishStats {
 	batchURL := strings.TrimRight(dashboardURL, "/") + "/api/dashboard/batch"
 	body := map[string]interface{}{
@@ -322,11 +545,10 @@ func fetchPublishBatchStats(dashboardURL string, taskIDs []string) map[string]pu
 	return batchResp.Stats
 }
 
-// listVisibleTasksPage 拉取全部创作任务、排除已停止项后重新分页（与管理员「任务数」统计口径一致）。
-func listVisibleTasksPage(sessionMgrURL, uidFilter, search string, page, size int, isStopped func(string) bool) (string, error) {
+func listVisibleTasks(sessionMgrURL, uidFilter, search string, isStopped func(string) bool) ([]map[string]interface{}, error) {
 	all, err := fetchAllTasksFromSessionMgr(sessionMgrURL, uidFilter, search)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	visible := make([]map[string]interface{}, 0, len(all))
 	for _, t := range all {
@@ -335,6 +557,14 @@ func listVisibleTasksPage(sessionMgrURL, uidFilter, search string, page, size in
 			continue
 		}
 		visible = append(visible, t)
+	}
+	return visible, nil
+}
+
+func listVisibleTasksPage(sessionMgrURL, uidFilter, search string, page, size int, isStopped func(string) bool) (string, error) {
+	visible, err := listVisibleTasks(sessionMgrURL, uidFilter, search, isStopped)
+	if err != nil {
+		return "", err
 	}
 	total := len(visible)
 	if page < 1 {
