@@ -478,7 +478,7 @@ func (p *QimaoPlatform) ensureBookExists(job *AutoPublishJob, cred, novelName st
 		if createResult.Status == "ok" && createResult.PostID != "" {
 			log.Printf("[auto_publish] task=%s 创建作品成功(qimao,alt): bookId=%s altName=%s",
 				job.TaskID, createResult.PostID, altName)
-			p.setNewBookInfo(job, cred, createResult.PostID, novelName)
+		p.setNewBookInfo(job, cred, createResult.PostID, altName)
 			return createResult.PostID
 		}
 	}
@@ -489,7 +489,7 @@ func (p *QimaoPlatform) ensureBookExists(job *AutoPublishJob, cred, novelName st
 
 // setNewBookInfo 从 skill 元数据中提取书籍信息并调用 SetBookInfo 上传封面和设置分类/简介。
 func (p *QimaoPlatform) setNewBookInfo(job *AutoPublishJob, cred, bookId, novelName string) {
-	name, description, category, roles, fetchErr := p.mgr.fetchSkillMeta(job.SkillID)
+	_, description, category, roles, fetchErr := p.mgr.fetchSkillMeta(job.SkillID)
 	if fetchErr != nil {
 		log.Printf("[auto_publish] task=%s 获取skill元信息失败(qimao): %v", job.TaskID, fetchErr)
 		return
@@ -501,11 +501,12 @@ func (p *QimaoPlatform) setNewBookInfo(job *AutoPublishJob, cred, bookId, novelN
 		author = novelName
 	}
 
-	coverBytes, downloadErr := p.mgr.downloadRenderedCover(job.SkillID, author, name)
+	coverBytes, downloadErr := p.mgr.downloadRenderedCover(job.SkillID, author, novelName)
 	if downloadErr != nil {
 		log.Printf("[auto_publish] task=%s 下载渲染封面失败(qimao): %v", job.TaskID, downloadErr)
 		return
 	}
+	_ = os.WriteFile(fmt.Sprintf("/tmp/logs/qimao_cover_raw_%s.png", job.TaskID), coverBytes, 0644)
 
 	bookOpt, optErr := p.adapter.GetBookOption(job.stopCtx, cred)
 	if optErr != nil {
@@ -524,11 +525,11 @@ func (p *QimaoPlatform) setNewBookInfo(job *AutoPublishJob, cred, bookId, novelN
 		}
 	}
 
-	result := p.adapter.SetBookInfo(job.stopCtx, cred, bookId, name, description, category, category2, tagIds, roles, coverBytes)
+	result := p.adapter.SetBookInfo(job.stopCtx, cred, bookId, novelName, description, category, category2, tagIds, roles, coverBytes)
 	if result.Status != "ok" {
 		log.Printf("[auto_publish] task=%s 设置书籍信息失败(qimao): %s (code=%s)", job.TaskID, result.ErrorMessage, result.ErrorCode)
 	} else {
-		log.Printf("[auto_publish] task=%s 书籍信息设置成功(qimao): bookId=%s name=%s", job.TaskID, bookId, name)
+		log.Printf("[auto_publish] task=%s 书籍信息设置成功(qimao): bookId=%s name=%s", job.TaskID, bookId, novelName)
 	}
 }
 
