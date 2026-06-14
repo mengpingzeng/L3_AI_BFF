@@ -46,9 +46,15 @@ type autoPublishTaskRow struct {
 	RecoverableAt  time.Time
 }
 
-func NewTaskManager(db *sql.DB, sessionMgrURL, workflowURL, accountURL, skillRegistryURL, a1BaseURL string, fanqieAdapter *c1.FanqiePublishAdapter, maxSlots int) *TaskManager {
+func NewTaskManager(db *sql.DB, sessionMgrURL, workflowURL, accountURL, skillRegistryURL, a1BaseURL string, fanqieAdapter *c1.FanqiePublishAdapter, qimaoAdapter *c1.QimaoPublishAdapter, maxSlots int) *TaskManager {
 	if maxSlots < 1 {
 		maxSlots = 2
+	}
+	fanqiePlatform := NewFanqiePlatform(fanqieAdapter)
+	qimaoPlatform := NewQimaoPlatform(qimaoAdapter)
+	platforms := map[string]NovelPlatform{
+		"fanqie": fanqiePlatform,
+		"qimao":  qimaoPlatform,
 	}
 	tm := &TaskManager{
 		db:             db,
@@ -57,7 +63,9 @@ func NewTaskManager(db *sql.DB, sessionMgrURL, workflowURL, accountURL, skillReg
 		maxSlots:       maxSlots,
 		dispatcherStop: make(chan struct{}),
 	}
-	tm.AutoPublishManager = NewAutoPublishManager(sessionMgrURL, workflowURL, accountURL, skillRegistryURL, "", fanqieAdapter, a1BaseURL)
+	tm.AutoPublishManager = NewAutoPublishManager(sessionMgrURL, workflowURL, accountURL, skillRegistryURL, "", platforms, a1BaseURL)
+	fanqiePlatform.SetManager(tm.AutoPublishManager)
+	qimaoPlatform.SetManager(tm.AutoPublishManager)
 	go tm.dispatchLoop()
 	return tm
 }
@@ -490,7 +498,7 @@ func (tm *TaskManager) GetTaskStatusHandler() gin.HandlerFunc {
 		if recoverableAt.Valid {
 			data["recoverable_at"] = recoverableAt.Time.Format(time.RFC3339)
 		}
-		if errorMessage.Valid {
+		if errorMessage.Valid && errorMessage.String != "publish daily limit: daily_limit_reached" {
 			data["auto_publish_error_message"] = errorMessage.String
 		}
 

@@ -48,12 +48,27 @@ func main() {
 		ScriptPath: cfg.FanqieScript,
 		Timeout:    600 * time.Second,
 	})
+	fanqiePlatform := handler.NewFanqiePlatform(fanqieAdapter)
 
-	autoPubMgr := handler.NewAutoPublishManager(cfg.SessionMgrURL, cfg.WorkflowURL, cfg.A1AccountURL, cfg.SkillRegistryURL, cfg.StoppedTasksFile, fanqieAdapter, cfg.A1BaseURL)
+	qimaoAdapter := c1.NewQimaoPublishAdapter(c1.AdapterConfig{
+		ScriptPath: cfg.QimaoScript,
+		Timeout:    600 * time.Second,
+	})
+	qimaoPlatform := handler.NewQimaoPlatform(qimaoAdapter)
+
+	platforms := map[string]handler.NovelPlatform{
+		"fanqie": fanqiePlatform,
+		"qimao":  qimaoPlatform,
+	}
+
+	autoPubMgr := handler.NewAutoPublishManager(cfg.SessionMgrURL, cfg.WorkflowURL, cfg.A1AccountURL, cfg.SkillRegistryURL, cfg.StoppedTasksFile, platforms, cfg.A1BaseURL)
+	fanqiePlatform.SetManager(autoPubMgr)
+	qimaoPlatform.SetManager(autoPubMgr)
+
 	var taskMgr *handler.TaskManager
 	if db != nil {
 		taskMgr = handler.NewTaskManager(db, cfg.SessionMgrURL, cfg.WorkflowURL,
-			cfg.A1AccountURL, cfg.SkillRegistryURL, cfg.A1BaseURL, fanqieAdapter, 2)
+			cfg.A1AccountURL, cfg.SkillRegistryURL, cfg.A1BaseURL, fanqieAdapter, qimaoAdapter, 2)
 		if err := taskMgr.RecoverFromMySQL(); err != nil {
 			log.Printf("TaskManager 恢复失败: %v", err)
 		}

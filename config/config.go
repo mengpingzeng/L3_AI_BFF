@@ -16,6 +16,7 @@ type Config struct {
 	AIModelURL        string
 	StoppedTasksFile  string
 	FanqieScript      string
+	QimaoScript       string
 	A1BaseURL         string
 	DB_DSN            string
 }
@@ -32,6 +33,7 @@ func Load() *Config {
 		AIModelURL:       getEnv("AI_MODEL_URL", "http://localhost:18180"),
 		StoppedTasksFile:  getEnv("STOPPED_TASKS_FILE", "/tmp/sm_demo/stopped_tasks.json"),
 		FanqieScript:      getEnv("FANQIE_SCRIPT", "/home/claw_studios/code/L1_AI_Releaser/scripts/publish_fanqie.js"),
+		QimaoScript:       getEnv("QIMAO_SCRIPT", "/home/claw_studios/code/L1_AI_Releaser/scripts/publish_qimao.js"),
 		A1BaseURL:         getEnv("A1_BASE_URL", "http://localhost:8084"),
 		DB_DSN:            getEnv("DB_DSN", "user:password@tcp(127.0.0.1:3306)/claw_studios?parseTime=true&charset=utf8mb4"),
 		ModelList: map[string]bool{

@@ -43,7 +43,7 @@ type AutoPublishManager struct {
 	stoppedTasksFile  string
 	stoppedTasks      map[string]bool
 	stoppedMu         sync.RWMutex
-	fanqieAdapter     *c1.FanqiePublishAdapter
+	platforms         map[string]NovelPlatform
 	a1BaseURL         string
 }
 
@@ -71,7 +71,7 @@ type AutoPublishJob struct {
 	onExitRequeue func(job *AutoPublishJob, err error)
 }
 
-func NewAutoPublishManager(sessionMgrURL, workflowURL, accountURL, skillRegistryURL, stoppedTasksFile string, fanqieAdapter *c1.FanqiePublishAdapter, a1BaseURL string) *AutoPublishManager {
+func NewAutoPublishManager(sessionMgrURL, workflowURL, accountURL, skillRegistryURL, stoppedTasksFile string, platforms map[string]NovelPlatform, a1BaseURL string) *AutoPublishManager {
 	m := &AutoPublishManager{
 		jobs:             make(map[string]*AutoPublishJob),
 		sessionMgrURL:    sessionMgrURL,
@@ -80,7 +80,7 @@ func NewAutoPublishManager(sessionMgrURL, workflowURL, accountURL, skillRegistry
 		skillRegistryURL: skillRegistryURL,
 		stoppedTasksFile: stoppedTasksFile,
 		stoppedTasks:     make(map[string]bool),
-		fanqieAdapter:    fanqieAdapter,
+		platforms:        platforms,
 		a1BaseURL:        a1BaseURL,
 		httpClient: &http.Client{
 			Timeout: 600 * time.Second,
@@ -521,123 +521,17 @@ type chapterGenState struct {
 }
 
 func (m *AutoPublishManager) autoPublishLoop(job *AutoPublishJob) {
-	const maxRetries = 3
-	job.retryCount = 0
-
-	var staged *chapterGenState
-
-	for {
-		if staged == nil {
-			select {
-			case <-job.stopCtx.Done():
-				m.cleanupSessions(job)
-				m.updateJobStatus(job.TaskID, "stopped")
-				if job.onExit != nil {
-					job.onExit(job, "stopped")
-				}
-				return
-			default:
-			}
-
-			staged = m.phasePrepare(job)
-			if staged == nil {
-				continue
-			}
+	platform, ok := m.platforms[job.Platform]
+	if !ok {
+		log.Printf("[auto_publish] task=%s unsupported platform=%s", job.TaskID, job.Platform)
+		m.cleanupSessions(job)
+		m.updateJobStatus(job.TaskID, "stopped")
+		if job.onExit != nil {
+			job.onExit(job, "stopped")
 		}
-
-		select {
-		case <-job.stopCtx.Done():
-			m.cleanupSessions(job)
-			m.updateJobStatus(job.TaskID, "stopped")
-			if job.onExit != nil {
-				job.onExit(job, "stopped")
-			}
-			return
-		default:
-		}
-
-		if staged.draft == "" {
-			if err := m.phaseGenerate(job, staged); err != nil {
-				if errors.Is(err, ErrDailyLimitReached) {
-					log.Printf("[auto_publish] task=%s DAILY_LIMIT(AI生成), 退出并重新入队", job.TaskID)
-					m.cleanupSessions(job)
-					if job.onExitRequeue != nil {
-						job.onExitRequeue(job, err)
-					}
-					return
-				}
-				job.retryCount++
-				if job.retryCount > maxRetries {
-					log.Printf("[auto_publish] task=%s AI生成连续失败%d次, 退出并重新入队", job.TaskID, maxRetries)
-					m.cleanupSessions(job)
-					if job.onExitRequeue != nil {
-						job.onExitRequeue(job, err)
-					}
-					return
-				}
-				log.Printf("[auto_publish] task=%s AI生成失败(第%d/%d次): %v, 1分钟后重试",
-					job.TaskID, job.retryCount, maxRetries, err)
-				m.sleepOrStop(job, 1*time.Minute)
-				continue
-			}
-		}
-
-		if staged.draftItemID == "" {
-			if err := m.phaseSaveDraft(job, staged); err != nil {
-				if errors.Is(err, ErrDailyLimitReached) {
-					log.Printf("[auto_publish] task=%s DAILY_LIMIT(存草稿), 退出并重新入队", job.TaskID)
-					m.cleanupSessions(job)
-					if job.onExitRequeue != nil {
-						job.onExitRequeue(job, err)
-					}
-					return
-				}
-				job.retryCount++
-				if job.retryCount > maxRetries {
-					log.Printf("[auto_publish] task=%s 存草稿连续失败%d次, 退出并重新入队", job.TaskID, maxRetries)
-					m.cleanupSessions(job)
-					if job.onExitRequeue != nil {
-						job.onExitRequeue(job, err)
-					}
-					return
-				}
-				log.Printf("[auto_publish] task=%s 存草稿失败(第%d/%d次): %v, 1分钟后重试",
-					job.TaskID, job.retryCount, maxRetries, err)
-				m.sleepOrStop(job, 1*time.Minute)
-				continue
-			}
-			m.updateTaskChapterNumber(job, staged.chapterTitle, staged.chapterNumber)
-		}
-
-		if err := m.phasePublishDraft(job, staged); err != nil {
-			if errors.Is(err, ErrDailyLimitReached) {
-				log.Printf("[auto_publish] task=%s DAILY_LIMIT(发布), 退出并重新入队", job.TaskID)
-				m.cleanupSessions(job)
-				if job.onExitRequeue != nil {
-					job.onExitRequeue(job, err)
-				}
-				return
-			}
-			job.retryCount++
-			if job.retryCount > maxRetries {
-				log.Printf("[auto_publish] task=%s 发布连续失败%d次, 退出并重新入队", job.TaskID, maxRetries)
-				m.cleanupSessions(job)
-				if job.onExitRequeue != nil {
-					job.onExitRequeue(job, err)
-				}
-				return
-			}
-			log.Printf("[auto_publish] task=%s 发布失败(第%d/%d次): %v, 1分钟后重试",
-				job.TaskID, job.retryCount, maxRetries, err)
-			m.sleepOrStop(job, 1*time.Minute)
-			continue
-		}
-
-		log.Printf("[auto_publish] task=%s ===== 第%d章完成 =====", job.TaskID, staged.chapterNumber)
-		job.retryCount = 0
-		staged = nil
-		time.Sleep(2 * time.Second)
+		return
 	}
+	platform.Run(job)
 }
 
 func (m *AutoPublishManager) sleepOrStop(job *AutoPublishJob, d time.Duration) {
@@ -669,108 +563,13 @@ func (m *AutoPublishManager) exitWithDailyLimit(job *AutoPublishJob) {
 	}
 }
 
-// phasePrepare 阶段一：获取凭据 → 查平台 → 确定下一章号；不涉及AI生成。
-// 返回 nil 表示跳过当前循环（已发布或 stop 信号）。
-func (m *AutoPublishManager) phasePrepare(job *AutoPublishJob) *chapterGenState {
-	if m.fanqieAdapter == nil {
-		log.Printf("[auto_publish] task=%s fanqie adapter not configured", job.TaskID)
-		return nil
-	}
-
-	cred, err := m.getFanqieCredential(job)
-	if err != nil {
-		job.retryCount++
-		log.Printf("[auto_publish] task=%s 获取凭据失败: %v", job.TaskID, err)
-		return nil
-	}
-
-	taskID := job.TaskID
-	novelName := job.NovelName
-
-	platformInfo, pubErr := m.fanqieAdapter.GetPlatformInfo(job.ctx(), novelName, cred, job.WorkID)
-	if pubErr != nil {
-		job.retryCount++
-		log.Printf("[auto_publish] task=%s get_platform_info失败: %s (code=%s)", taskID, pubErr.ErrorMessage, pubErr.ErrorCode)
-		return nil
-	}
-
-	if platformInfo.WorkID != "" {
-		job.mu.Lock()
-		job.WorkID = platformInfo.WorkID
-		job.mu.Unlock()
-	}
-
-	log.Printf("[auto_publish] task=%s 平台状态: workId=%s published=%d drafts=%d",
-		taskID, platformInfo.WorkID, len(platformInfo.PublishedChapters), len(platformInfo.Drafts))
-
-	isNewBook := platformInfo.NewlyCreated
-
-	job.mu.Lock()
-	currentVolume := job.VolumeName
-	currentChapter := job.ChapterNumber
-	job.mu.Unlock()
-
-	if currentVolume == "" {
-		currentVolume = "第一卷"
-	}
-
-	var lastPublished *c1.FanqieLastPublished
-	if platformInfo.LastPublished != nil {
-		lastPublished = platformInfo.LastPublished
-	} else {
-		lastPublished = &c1.FanqieLastPublished{ChapterNumber: 0}
-	}
-
-	nextChapter, nextVolume := m.determineNextChapter(lastPublished, currentVolume, currentChapter, platformInfo)
-	log.Printf("[auto_publish] task=%s 计算下一章: volume=%s chapter=%d (currentChapter=%d)",
-		taskID, nextVolume, nextChapter, currentChapter)
-
-	var volumeId string
-	apiVolumeName := nextVolume
-	for _, v := range platformInfo.Volumes {
-		if strings.Contains(v.VolumeName, nextVolume) {
-			volumeId = v.VolumeID
-			apiVolumeName = v.VolumeName
-			break
-		}
-	}
-	log.Printf("[auto_publish] task=%s 分卷映射: nextVolume=%s apiVolumeName=%s volumeId=%s", taskID, nextVolume, apiVolumeName, volumeId)
-
-	if m.isAlreadyPublished(lastPublished, nextChapter) {
-		log.Printf("[auto_publish] task=%s 章节%d已发布, 跳过", taskID, nextChapter)
-		job.mu.Lock()
-		job.ChapterNumber = nextChapter
-		job.VolumeName = nextVolume
-		job.mu.Unlock()
-		m.updateTaskChapterNumber(job, "", nextChapter)
-		return nil
-	}
-
-	if isNewBook {
-		log.Printf("[auto_publish] task=%s 检测到新书, 开始设置书籍信息", taskID)
-		m.setNewBookInfo(job, cred, platformInfo, novelName)
-	}
-
-	job.mu.Lock()
-	job.VolumeName = nextVolume
-	job.ChapterNumber = nextChapter
-	job.mu.Unlock()
-
-	return &chapterGenState{
-		chapterNumber: nextChapter,
-		volume:        nextVolume,
-		apiVolumeName: apiVolumeName,
-		volumeId:      volumeId,
-		platformInfo:  platformInfo,
-		cred:          cred,
-	}
-}
-
 // phaseGenerate 阶段二：AI生成章节内容（wakeTask + waitForSession + getDraft）。
 // 失败时可以重试——会重新创建session生成新内容。
 func (m *AutoPublishManager) phaseGenerate(job *AutoPublishJob, state *chapterGenState) error {
 	taskID := job.TaskID
 	log.Printf("[auto_publish] task=%s AI生成章节 chapter=%d vol=%s", taskID, state.chapterNumber, state.volume)
+
+	m.cleanupExistingChapter(taskID, state.volume, state.chapterNumber)
 
 	sessionID, _, err := m.wakeTask(job, false)
 	if err != nil {
@@ -823,398 +622,6 @@ func (m *AutoPublishManager) phaseGenerate(job *AutoPublishJob, state *chapterGe
 	state.chapterTitle = chapterTitle
 	state.fullTitle = fmt.Sprintf("第%d章 %s", state.chapterNumber, chapterTitle)
 	return nil
-}
-
-// phaseSaveDraft 阶段三：存草稿到平台（API优先，Puppeteer兜底），失败时用相同draft重试。
-func (m *AutoPublishManager) phaseSaveDraft(job *AutoPublishJob, state *chapterGenState) error {
-	taskID := job.TaskID
-	log.Printf("[auto_publish] task=%s 存草稿 title=%s chapter=%d", taskID, state.fullTitle, state.chapterNumber)
-
-	saveResult := m.fanqieAdapter.SaveDraftViaPageAPI(job.ctx(), state.fullTitle, state.draft, job.NovelName, state.chapterNumber, state.cred, job.WorkID, state.apiVolumeName, state.volumeId)
-	if saveResult.Status != "ok" {
-		log.Printf("[auto_publish] task=%s API存草稿失败: %s (code=%s), 回退Puppeteer", taskID, saveResult.ErrorMessage, saveResult.ErrorCode)
-		saveResult = m.fanqieAdapter.SaveDraft(job.ctx(), state.chapterTitle, state.draft, job.NovelName, state.chapterNumber, state.cred, job.WorkID)
-		if saveResult.Status != "ok" {
-			return fmt.Errorf("save draft: %s (code=%s)", saveResult.ErrorMessage, saveResult.ErrorCode)
-		}
-		log.Printf("[auto_publish] task=%s Puppeteer兜底存草稿成功", taskID)
-	}
-
-	state.draftItemID = saveResult.DraftItemID
-	log.Printf("[auto_publish] task=%s 存草稿成功: title=%s draftItemID=%s", taskID, state.chapterTitle, state.draftItemID)
-	return nil
-}
-
-// phasePublishDraft 阶段四：从草稿箱发布（API优先，Puppeteer兜底），失败时只重试发布不动draft。
-func (m *AutoPublishManager) phasePublishDraft(job *AutoPublishJob, state *chapterGenState) error {
-	taskID := job.TaskID
-	log.Printf("[auto_publish] task=%s 发布章节 title=%s chapter=%d", taskID, state.fullTitle, state.chapterNumber)
-
-	draftItemID := state.draftItemID
-	if draftItemID == "" {
-		platformInfo2, pubErr2 := m.fanqieAdapter.GetPlatformInfo(job.ctx(), job.NovelName, state.cred, job.WorkID)
-		if pubErr2 != nil {
-			log.Printf("[auto_publish] task=%s 获取平台状态失败(发布前): %s", taskID, pubErr2.ErrorMessage)
-		} else {
-			for _, d := range platformInfo2.Drafts {
-				if d.ChapterNumber == state.chapterNumber {
-					draftItemID = d.ItemID
-					break
-				}
-			}
-		}
-	}
-
-	pubResult := m.fanqieAdapter.PublishDraftViaPageAPI(job.ctx(), job.WorkID, draftItemID, state.fullTitle, state.draft, state.apiVolumeName, state.volumeId, state.cred)
-	if pubResult.Status != "ok" {
-		if pubResult.ErrorCode == c1.ErrCodeDailyLimit {
-			return fmt.Errorf("publish daily limit: %w", ErrDailyLimitReached)
-		}
-		log.Printf("[auto_publish] task=%s API发布失败: %s, 回退Puppeteer", taskID, pubResult.ErrorMessage)
-		pubResult = m.fanqieAdapter.PublishDraft(job.ctx(), state.chapterTitle, job.NovelName, state.volume, state.cred, job.WorkID, draftItemID)
-		if pubResult.Status != "ok" {
-			if pubResult.ErrorCode == c1.ErrCodeDailyLimit {
-				return fmt.Errorf("publish daily limit: %w", ErrDailyLimitReached)
-			}
-			return fmt.Errorf("publish draft: %s (code=%s)", pubResult.ErrorMessage, pubResult.ErrorCode)
-		}
-		log.Printf("[auto_publish] task=%s Puppeteer兜底发布成功", taskID)
-	}
-
-	log.Printf("[auto_publish] task=%s 发布成功: title=%s postId=%s", taskID, state.fullTitle, pubResult.PostID)
-
-	if pubResult.PostID != "" && pubResult.PostID != job.WorkID {
-		m.updatePublishedCount(job)
-		m.saveSessionPostID(job.TaskID, state.sessionID, pubResult.PostID)
-	} else {
-		log.Printf("[auto_publish] task=%s postId 无效(workId=%s)，跳过发布计数", taskID, job.WorkID)
-	}
-	return nil
-}
-
-// generateChapter May 29 方案核心：先查平台状态确定章号 → 创作 → 推草稿箱。
-func (m *AutoPublishManager) generateChapter(job *AutoPublishJob, isFinale bool) error {
-	if m.fanqieAdapter == nil {
-		return fmt.Errorf("fanqie adapter not configured")
-	}
-
-	job.mu.Lock()
-	novelName := job.NovelName
-	job.mu.Unlock()
-
-	cred, err := m.getFanqieCredential(job)
-	if err != nil {
-		return fmt.Errorf("credential: %w", err)
-	}
-
-	taskID := job.TaskID
-
-	log.Printf("[auto_publish] task=%s ===== 开始生成章节 (isFinale=%v) =====", taskID, isFinale)
-
-	// ① 查平台草稿箱 + 已发布列表
-	platformInfo, pubErr := m.fanqieAdapter.GetPlatformInfo(job.ctx(), novelName, cred, job.WorkID)
-	if pubErr != nil {
-		return fmt.Errorf("get platform info: %s (code=%s)", pubErr.ErrorMessage, pubErr.ErrorCode)
-	}
-
-	if platformInfo.WorkID != "" {
-		job.mu.Lock()
-		job.WorkID = platformInfo.WorkID
-		job.mu.Unlock()
-	}
-
-	log.Printf("[auto_publish] task=%s 平台状态: workId=%s published=%d drafts=%d",
-		taskID, platformInfo.WorkID, len(platformInfo.PublishedChapters), len(platformInfo.Drafts))
-
-	isNewBook := platformInfo.NewlyCreated
-
-	var lastPublished *c1.FanqieLastPublished
-	if platformInfo.LastPublished != nil {
-		lastPublished = platformInfo.LastPublished
-		if platformInfo.LastPublished.ChapterNumber > 0 {
-			log.Printf("[auto_publish] task=%s 最新已发布: chapter=%d title=%s",
-				taskID, platformInfo.LastPublished.ChapterNumber, platformInfo.LastPublished.Title)
-		}
-	} else {
-		lastPublished = &c1.FanqieLastPublished{ChapterNumber: 0}
-	}
-
-	// ② 确定下一章号
-	job.mu.Lock()
-	currentVolume := job.VolumeName
-	currentChapter := job.ChapterNumber
-	job.mu.Unlock()
-
-	if currentVolume == "" {
-		currentVolume = "第一卷"
-	}
-
-	nextChapter, nextVolume := m.determineNextChapter(lastPublished, currentVolume, currentChapter, platformInfo)
-	log.Printf("[auto_publish] task=%s 计算下一章: volume=%s chapter=%d (lastPublished=%d currentChapter=%d)",
-		taskID, nextVolume, nextChapter, lastPublished.ChapterNumber, currentChapter)
-
-	var volumeId string
-	apiVolumeName := nextVolume
-	for _, v := range platformInfo.Volumes {
-		if strings.Contains(v.VolumeName, nextVolume) {
-			volumeId = v.VolumeID
-			apiVolumeName = v.VolumeName
-			break
-		}
-	}
-	log.Printf("[auto_publish] task=%s 分卷映射: nextVolume=%s apiVolumeName=%s volumeId=%s", taskID, nextVolume, apiVolumeName, volumeId)
-
-	if m.isAlreadyPublished(lastPublished, nextChapter) {
-		log.Printf("[auto_publish] task=%s 章节 %d 已在已发布列表中，跳过生成，直接推进号", taskID, nextChapter)
-		job.mu.Lock()
-		job.ChapterNumber = nextChapter
-		job.VolumeName = nextVolume
-		job.mu.Unlock()
-		m.updateTaskChapterNumber(job, "", nextChapter)
-		return nil
-	}
-
-	// ③ 创作章节
-	log.Printf("[auto_publish] task=%s AI 生成章节 chapter=%d vol=%s", taskID, nextChapter, nextVolume)
-
-	job.mu.Lock()
-	oldVolume := job.VolumeName
-	oldChapter := job.ChapterNumber
-	job.VolumeName = nextVolume
-	job.ChapterNumber = nextChapter
-	job.mu.Unlock()
-
-	sessionID, _, err := m.wakeTask(job, isFinale)
-	if err != nil {
-		errStr := err.Error()
-		if strings.Contains(errStr, "already has active session") || strings.Contains(errStr, "active session") {
-			existingSID := m.extractSessionFromError(errStr)
-			if existingSID == "" {
-				sessions, fetchErr := m.fetchSessions(taskID)
-				if fetchErr == nil && len(sessions) > 0 {
-					existingSID = sessions[0].SessionID
-				}
-			}
-			if existingSID != "" {
-				if m.isSessionAlive(existingSID) {
-					log.Printf("[auto_publish] task=%s 活跃session=%s 仍在运行中，不关闭，待其自行完成", taskID, existingSID)
-				} else {
-					log.Printf("[auto_publish] task=%s session=%s 为僵尸，关闭后重试wake", taskID, existingSID)
-					m.closeSessionQuiet(existingSID)
-					sessionID, _, err = m.wakeTask(job, isFinale)
-				}
-			}
-		}
-		if err != nil {
-			job.mu.Lock()
-			job.VolumeName = oldVolume
-			job.ChapterNumber = oldChapter
-			job.mu.Unlock()
-			return fmt.Errorf("wake task: %w", err)
-		}
-	}
-	log.Printf("[auto_publish] task=%s session=%s 已创建", taskID, sessionID)
-
-	draft, chapterTitle, draftVersion, err := m.waitForSession(job, sessionID)
-	if err != nil {
-		m.closeSessionQuiet(sessionID)
-		return fmt.Errorf("wait for session: %w", err)
-	}
-	m.closeSessionQuiet(sessionID)
-
-	job.mu.Lock()
-	job.DraftVersion = draftVersion
-	job.mu.Unlock()
-
-	log.Printf("[auto_publish] task=%s AI 生成完成: title=%s contentLen=%d", taskID, chapterTitle, len(draft))
-
-	if chapterTitle == "" {
-		chapterTitle = fallbackChapterTitle(draft)
-		log.Printf("[auto_publish] task=%s 标题为空，从正文生成兜底标题: %s", taskID, chapterTitle)
-	}
-
-	fullTitle := fmt.Sprintf("第%d章 %s", nextChapter, chapterTitle)
-
-	// ③.5 新书：立即设置书籍信息（不依赖 save_draft 成功，避免 save_draft 失败导致错过触发窗口）
-	if isNewBook {
-		log.Printf("[auto_publish] task=%s 检测到新书, 开始设置书籍信息", taskID)
-		m.setNewBookInfo(job, cred, platformInfo, novelName)
-	}
-
-	// ④ 推到草稿箱（API 优先，Puppeteer 兜底）
-	log.Printf("[auto_publish] task=%s 存草稿到平台草稿箱 title=%s chapter=%d", taskID, fullTitle, nextChapter)
-
-	saveResult := m.fanqieAdapter.SaveDraftViaPageAPI(job.ctx(), fullTitle, draft, novelName, nextChapter, cred, job.WorkID, apiVolumeName, volumeId)
-	if saveResult.Status != "ok" {
-		log.Printf("[auto_publish] task=%s API存草稿失败: %s (code=%s), 回退Puppeteer", taskID, saveResult.ErrorMessage, saveResult.ErrorCode)
-		saveResult = m.fanqieAdapter.SaveDraft(job.ctx(), chapterTitle, draft, novelName, nextChapter, cred, job.WorkID)
-		if saveResult.Status != "ok" {
-			return &saveDraftRetryError{
-				sessionID:    sessionID,
-				draft:        draft,
-				chapterTitle: chapterTitle,
-				chapterNum:   nextChapter,
-				volume:       nextVolume,
-				err:          fmt.Errorf("save draft: %s (code=%s)", saveResult.ErrorMessage, saveResult.ErrorCode),
-			}
-		}
-		log.Printf("[auto_publish] task=%s Puppeteer兜底存草稿成功: title=%s", taskID, chapterTitle)
-	}
-	log.Printf("[auto_publish] task=%s 存草稿成功: title=%s", taskID, chapterTitle)
-
-	m.updateTaskChapterNumber(job, chapterTitle, nextChapter)
-
-	// ⑤ 从草稿箱推发布（优先 API，Puppeteer 兜底）
-	log.Printf("[auto_publish] task=%s 从草稿箱推发布 title=%s fullTitle=%s chapter=%d", taskID, chapterTitle, fullTitle, nextChapter)
-
-	// 优先使用 save_draft 返回的 draftItemId（从页面 URL 精确提取），
-	// 失败时回退到 get_platform_info → draft_list API 匹配
-	draftItemID := saveResult.DraftItemID
-	if draftItemID == "" {
-		platformInfo2, pubErr2 := m.fanqieAdapter.GetPlatformInfo(job.ctx(), novelName, cred, job.WorkID)
-		if pubErr2 != nil {
-			log.Printf("[auto_publish] task=%s 获取平台状态失败(发布前): %s", taskID, pubErr2.ErrorMessage)
-		} else {
-			for _, d := range platformInfo2.Drafts {
-				if d.ChapterNumber == nextChapter {
-					draftItemID = d.ItemID
-					break
-				}
-			}
-		}
-	}
-
-	// 优先：通过浏览器内 API 直接发布
-	var pubResult *c1.PublishResult
-	pubResult = m.fanqieAdapter.PublishDraftViaPageAPI(job.ctx(), job.WorkID, draftItemID, fullTitle, draft, apiVolumeName, volumeId, cred)
-	if pubResult.Status != "ok" {
-		if pubResult.ErrorCode == c1.ErrCodeDailyLimit {
-			log.Printf("[auto_publish] task=%s 发布失败(字数超限), 不重试", taskID)
-			return fmt.Errorf("publish daily limit: %w", ErrDailyLimitReached)
-		}
-		log.Printf("[auto_publish] task=%s API发布草稿失败: %s, 回退Puppeteer", taskID, pubResult.ErrorMessage)
-		pubResult = m.fanqieAdapter.PublishDraft(job.ctx(), chapterTitle, novelName, nextVolume, cred, job.WorkID, draftItemID)
-		if pubResult.Status != "ok" {
-			if pubResult.ErrorCode == c1.ErrCodeDailyLimit {
-				return fmt.Errorf("publish daily limit: %w", ErrDailyLimitReached)
-			}
-			return &publishRetryError{
-				sessionID:    sessionID,
-				draftItemID:  draftItemID,
-				chapterTitle: chapterTitle,
-				volume:       nextVolume,
-				err:          fmt.Errorf("publish draft: %s (code=%s)", pubResult.ErrorMessage, pubResult.ErrorCode),
-			}
-		}
-		log.Printf("[auto_publish] task=%s Puppeteer兜底发布成功: title=%s postId=%s", taskID, chapterTitle, pubResult.PostID)
-	}
-
-	log.Printf("[auto_publish] task=%s 发布草稿成功: title=%s postId=%s", taskID, fullTitle, pubResult.PostID)
-
-	if pubResult.PostID != "" && pubResult.PostID != job.WorkID {
-		m.updatePublishedCount(job)
-		m.saveSessionPostID(job.TaskID, sessionID, pubResult.PostID)
-	} else {
-		log.Printf("[auto_publish] task=%s postId 无效(workId=%s)，跳过发布计数", taskID, job.WorkID)
-	}
-
-	log.Printf("[auto_publish] task=%s ===== 章节生成完成 chapter=%d =====", taskID, nextChapter)
-	return nil
-}
-
-func (job *AutoPublishJob) ctx() context.Context {
-	return job.stopCtx
-}
-
-// getFanqieCredential 从 A1 密钥库获取 fanqie 平台的 cookie。
-func (m *AutoPublishManager) getFanqieCredential(job *AutoPublishJob) (string, error) {
-	job.mu.Lock()
-	accounts := job.Accounts
-	job.mu.Unlock()
-
-	if len(accounts) == 0 {
-		return "", fmt.Errorf("no accounts configured")
-	}
-
-	for _, acc := range accounts {
-		if acc["platform"] != "fanqie" {
-			continue
-		}
-		accountID := acc["accountId"]
-		uid := acc["uid"]
-
-		url := fmt.Sprintf("%s/api/account/credentials", m.a1BaseURL)
-		body := map[string]interface{}{
-			"account_id": accountID,
-			"uid":        uid,
-			"caller":     "c1_publisher",
-		}
-		jsonBody, err := json.Marshal(body)
-		if err != nil {
-			continue
-		}
-		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(jsonBody))
-		if err != nil {
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := m.httpClient.Do(req)
-		if err != nil {
-			log.Printf("[auto_publish] task=%s 获取凭证失败 account=%s: %v", job.TaskID, accountID, err)
-			continue
-		}
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		if resp.StatusCode >= 400 {
-			continue
-		}
-
-		var credResp struct {
-			Credentials string `json:"credentials"`
-		}
-		if err := json.Unmarshal(respBody, &credResp); err != nil || credResp.Credentials == "" {
-			continue
-		}
-
-		return credResp.Credentials, nil
-	}
-
-	return "", fmt.Errorf("no fanqie account credential available")
-}
-
-// determineNextChapter 根据平台状态计算下一个章号和卷名。
-func (m *AutoPublishManager) determineNextChapter(lastPublished *c1.FanqieLastPublished, currentVolume string, currentChapter int, platformInfo *c1.PlatformInfo) (int, string) {
-	if lastPublished == nil || lastPublished.ChapterNumber == 0 {
-		if currentChapter > 0 {
-			return currentChapter + 1, currentVolume
-		}
-		return 1, currentVolume
-	}
-
-	nextChapter := currentChapter + 1
-	nextVolume := currentVolume
-
-	if nextChapter <= lastPublished.ChapterNumber {
-		nextChapter = lastPublished.ChapterNumber + 1
-	}
-
-	if nextVolume == "" {
-		nextVolume = "第一卷"
-	}
-	if nextChapter <= 0 {
-		nextChapter = 1
-	}
-
-	return nextChapter, nextVolume
-}
-
-// isAlreadyPublished 检查章节是否已在已发布列表中。
-func (m *AutoPublishManager) isAlreadyPublished(lastPublished *c1.FanqieLastPublished, nextChapter int) bool {
-	if lastPublished == nil {
-		return false
-	}
-	return nextChapter <= lastPublished.ChapterNumber
 }
 
 // wakeTask 创建新的创作 session。
@@ -1338,40 +745,52 @@ func (m *AutoPublishManager) getDraft(sessionID string) (string, string, error) 
 	return resp.Draft, resp.ChapterTitle, nil
 }
 
-// setNewBookInfo 从 skill 元数据中提取书籍信息并调用 SetBookInfo 上传封面和设置分类/简介。
-// 在新书首次 get_platform_info 返回 newlyCreated=true 时立即调用，不依赖 save_draft 结果。
-func (m *AutoPublishManager) setNewBookInfo(job *AutoPublishJob, cred string, platformInfo *c1.PlatformInfo, novelName string) {
-	name, description, category, roles, fetchErr := m.fetchSkillMeta(job.SkillID)
-	if fetchErr != nil {
-		log.Printf("[auto_publish] task=%s 获取skill元信息失败: %v", job.TaskID, fetchErr)
-		return
-	}
-	if platformInfo.BookName != "" {
-		name = platformInfo.BookName
-	}
-	author, authorErr := m.fanqieAdapter.ResolveAuthorName(job.ctx(), cred)
-	if authorErr != nil {
-		log.Printf("[auto_publish] task=%s 获取账号笔名失败: %v, 使用novelName作为fallback", job.TaskID, authorErr)
-		author = novelName
-	}
-	coverBytes, downloadErr := m.downloadRenderedCover(job.SkillID, author, name)
-	if downloadErr != nil {
-		log.Printf("[auto_publish] task=%s 下载渲染封面失败: %v", job.TaskID, downloadErr)
-		return
-	}
-	result := m.fanqieAdapter.SetBookInfo(job.ctx(), cred, platformInfo.WorkID, name, description, category, roles, coverBytes)
-	if result.Status != "ok" {
-		log.Printf("[auto_publish] task=%s 设置书籍信息失败: %s (code=%s)", job.TaskID, result.ErrorMessage, result.ErrorCode)
-	} else {
-		log.Printf("[auto_publish] task=%s 书籍信息设置成功: name=%s", job.TaskID, name)
-	}
-}
-
 func (m *AutoPublishManager) closeSessionQuiet(sessionID string) {
 	url := fmt.Sprintf("%s/api/session/%s/close", m.sessionMgrURL, sessionID)
 	_, err := m.doPost(url, map[string]interface{}{})
 	if err != nil {
 		log.Printf("[auto_publish] 关闭会话失败 session=%s: %v", sessionID, err)
+	}
+}
+
+func (m *AutoPublishManager) cleanupExistingChapter(taskID, volumeName string, chapterNumber int) {
+	sessions, err := m.fetchSessions(taskID)
+	if err != nil {
+		log.Printf("[auto_publish] task=%s cleanupExistingChapter 获取sessions失败: %v", taskID, err)
+		return
+	}
+
+	var staleIDs []string
+	for _, s := range sessions {
+		volName := s.VolumeName
+		if volName == "" {
+			volName = "第一卷"
+		}
+		if volName == volumeName && s.ChapterNumber == chapterNumber && s.PostID == "" {
+			staleIDs = append(staleIDs, s.SessionID)
+		}
+	}
+
+	if len(staleIDs) == 0 {
+		return
+	}
+
+	log.Printf("[auto_publish] task=%s cleanupExistingChapter vol=%s ch=%d 清理%d个残留session",
+		taskID, volumeName, chapterNumber, len(staleIDs))
+
+	for _, sid := range staleIDs {
+		req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/session/%s", m.sessionMgrURL, sid), nil)
+		if err != nil {
+			log.Printf("[auto_publish] cleanupExistingChapter 构建请求失败 sid=%s: %v", sid, err)
+			continue
+		}
+		resp, err := m.httpClient.Do(req)
+		if err != nil {
+			log.Printf("[auto_publish] cleanupExistingChapter 请求失败 sid=%s: %v", sid, err)
+			continue
+		}
+		resp.Body.Close()
+		log.Printf("[auto_publish] cleanupExistingChapter 已删除残留session=%s", sid)
 	}
 }
 
@@ -1425,6 +844,8 @@ type sessionRaw struct {
 	SessionID     string `json:"session_id"`
 	Status        string `json:"status"`
 	ChapterNumber int    `json:"chapter_number"`
+	VolumeName    string `json:"volume_name,omitempty"`
+	PostID        string `json:"post_id,omitempty"`
 }
 
 // publishRetryError 表示 PublishDraft 失败但草稿已保存，可只重试发布步骤
@@ -1521,97 +942,6 @@ func (m *AutoPublishManager) saveSessionPostID(taskID, sessionID, postID string)
 	log.Printf("[auto_publish] task=%s 保存PostID成功 session=%s resp=%s", taskID, sessionID, string(respBody))
 }
 
-func (m *AutoPublishManager) retryPublishOnly(job *AutoPublishJob, sessionID, draftItemID, chapterTitle, volume string) error {
-	cred, err := m.getFanqieCredential(job)
-	if err != nil {
-		return fmt.Errorf("credential: %w", err)
-	}
-
-	log.Printf("[auto_publish] task=%s 重试发布: draftItemID=%s chapter=%s volume=%s", job.TaskID, draftItemID, chapterTitle, volume)
-
-	pubResult := m.fanqieAdapter.PublishDraft(job.ctx(), chapterTitle, job.NovelName, volume, cred, job.WorkID, draftItemID)
-	if pubResult.Status != "ok" {
-		return fmt.Errorf("publish draft retry: %s (code=%s)", pubResult.ErrorMessage, pubResult.ErrorCode)
-	}
-
-	log.Printf("[auto_publish] task=%s 重试发布成功: title=%s postId=%s", job.TaskID, chapterTitle, pubResult.PostID)
-
-	if pubResult.PostID != "" && pubResult.PostID != job.WorkID {
-		m.updatePublishedCount(job)
-		m.saveSessionPostID(job.TaskID, sessionID, pubResult.PostID)
-	} else {
-		log.Printf("[auto_publish] task=%s 重试发布 postId 无效(workId=%s)，跳过发布计数", job.TaskID, job.WorkID)
-	}
-	return nil
-}
-
-func (m *AutoPublishManager) retrySaveAndPublish(job *AutoPublishJob, sessionID, draft, chapterTitle string, chapterNum int, volume string) error {
-	cred, err := m.getFanqieCredential(job)
-	if err != nil {
-		return fmt.Errorf("credential: %w", err)
-	}
-
-	novelName := job.NovelName
-	log.Printf("[auto_publish] task=%s 重试存草稿+发布: chapter=%d title=%s volume=%s", job.TaskID, chapterNum, chapterTitle, volume)
-
-	fullTitle := fmt.Sprintf("第%d章 %s", chapterNum, chapterTitle)
-
-	// 先获取平台信息用于 volumeId 解析和后续 draftItemID 查询
-	platformInfo, pubErr := m.fanqieAdapter.GetPlatformInfo(job.ctx(), novelName, cred, job.WorkID)
-	var volumeId, apiVolumeName string
-	apiVolumeName = volume
-	if pubErr == nil {
-		for _, v := range platformInfo.Volumes {
-			if strings.Contains(v.VolumeName, volume) {
-				volumeId = v.VolumeID
-				apiVolumeName = v.VolumeName
-				break
-			}
-		}
-	}
-
-	// API 优先存草稿
-	saveResult := m.fanqieAdapter.SaveDraftViaPageAPI(job.ctx(), fullTitle, draft, novelName, chapterNum, cred, job.WorkID, apiVolumeName, volumeId)
-	if saveResult.Status != "ok" {
-		log.Printf("[auto_publish] task=%s 重试API存草稿失败: %s, 回退Puppeteer", job.TaskID, saveResult.ErrorMessage)
-		saveResult = m.fanqieAdapter.SaveDraft(job.ctx(), chapterTitle, draft, novelName, chapterNum, cred, job.WorkID)
-		if saveResult.Status != "ok" {
-			return fmt.Errorf("save draft retry: %s (code=%s)", saveResult.ErrorMessage, saveResult.ErrorCode)
-		}
-	}
-	log.Printf("[auto_publish] task=%s 重试存草稿成功: title=%s", job.TaskID, chapterTitle)
-
-	m.updateTaskChapterNumber(job, chapterTitle, chapterNum)
-
-	// 获取 draftItemID：优先从 saveResult，兜底从平台信息
-	draftItemID := saveResult.DraftItemID
-	if draftItemID == "" {
-		// save 前的 platformInfo 可能没有新草稿，重新获取
-		platformInfo2, pubErr2 := m.fanqieAdapter.GetPlatformInfo(job.ctx(), novelName, cred, job.WorkID)
-		if pubErr2 == nil {
-			for _, d := range platformInfo2.Drafts {
-				if d.ChapterNumber == chapterNum {
-					draftItemID = d.ItemID
-					break
-				}
-			}
-		}
-	}
-
-	pubResult := m.fanqieAdapter.PublishDraft(job.ctx(), chapterTitle, novelName, volume, cred, job.WorkID, draftItemID)
-	if pubResult.Status != "ok" {
-		return fmt.Errorf("publish draft retry: %s (code=%s)", pubResult.ErrorMessage, pubResult.ErrorCode)
-	}
-
-	log.Printf("[auto_publish] task=%s 重试发布成功: title=%s postId=%s", job.TaskID, chapterTitle, pubResult.PostID)
-
-	if pubResult.PostID != "" && pubResult.PostID != job.WorkID {
-		m.updatePublishedCount(job)
-		m.saveSessionPostID(job.TaskID, sessionID, pubResult.PostID)
-	}
-	return nil
-}
-
 func (m *AutoPublishManager) executeFinish(taskID, userID string, taskInfo *taskInfoData) {
 	skillID := taskInfo.SkillID
 	if skillID == "" {
@@ -1641,7 +971,14 @@ func (m *AutoPublishManager) executeFinish(taskID, userID string, taskInfo *task
 	m.jobs[taskID] = job
 	m.mu.Unlock()
 
-	if err := m.generateChapter(job, true); err != nil {
+	platform, ok := m.platforms[taskInfo.Platform]
+	if !ok {
+		log.Printf("[auto_publish] task=%s unsupported platform=%s for finalize", taskID, taskInfo.Platform)
+		m.updateJobStatus(taskID, "stopped")
+		return
+	}
+
+	if err := platform.Finalize(job); err != nil {
 		log.Printf("[auto_publish] task=%s 手动完结失败: %v", taskID, err)
 		m.updateJobStatus(taskID, "stopped")
 		return

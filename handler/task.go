@@ -360,7 +360,7 @@ func enrichTasksWithAutoPublish(tasksJSON []byte, taskMgr *TaskManager) []byte {
 		if idx, ok := taskIndex[tid]; ok {
 			resp.Tasks[idx]["auto_publish_status"] = status
 			resp.Tasks[idx]["auto_publish_entry_time"] = entryTime.Format(time.RFC3339)
-			if errMsg.Valid {
+			if errMsg.Valid && errMsg.String != "publish daily limit: daily_limit_reached" {
 				resp.Tasks[idx]["auto_publish_error_message"] = errMsg.String
 			}
 		}

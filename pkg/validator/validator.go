@@ -11,7 +11,7 @@ var (
 	reTaskID       = regexp.MustCompile(`^task_[a-z0-9]{12}$`)
 	reSessionID    = regexp.MustCompile(`^(sess_)?[a-z0-9]+$`)
 	reAccID        = regexp.MustCompile(`^acc_[a-z0-9]+$`)
-	validPlatforms = map[string]bool{"fanqie": true, "xhs": true, "wechat": true, "yuewen": true, "zhulang": true}
+	validPlatforms = map[string]bool{"fanqie": true, "xhs": true, "wechat": true, "yuewen": true, "zhulang": true, "qimao": true}
 
 	ModelList = map[string]bool{
 		"deepseek-chat":     true,
